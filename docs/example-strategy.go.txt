@@ -1,0 +1,295 @@
+/*
+Example: Custom Recommendation Strategy
+
+This is a complete example of how to implement a custom recommendation strategy.
+Copy this code into your own Go file (e.g., internal/recommender/strategy/mystrategy.go)
+and modify it to create your own strategy.
+
+IMPORTANT: This file is for documentation only. Copy the code below into a .go file
+in the strategy package to use it.
+*/
+
+package strategy
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+
+	autoscalingv1alpha1 "github.com/sartorproj/sartor/api/v1alpha1"
+	"github.com/sartorproj/sartor/internal/metrics/prometheus"
+)
+
+// ExampleStrategy is an example custom strategy that demonstrates
+// how to implement the Strategy interface.
+type ExampleStrategy struct {
+	// Add any internal state here
+	defaultMultiplier float64
+}
+
+// NewExampleStrategy creates a new example strategy.
+func NewExampleStrategy() *ExampleStrategy {
+	return &ExampleStrategy{
+		defaultMultiplier: 1.3,
+	}
+}
+
+// Name returns the unique name of the strategy.
+func (s *ExampleStrategy) Name() string {
+	return "example"
+}
+
+// Calculate computes resource recommendations.
+func (s *ExampleStrategy) Calculate(
+	ctx context.Context,
+	metrics []prometheus.ContainerMetrics,
+	currentResources map[string]autoscalingv1alpha1.ResourceRequirements,
+	config StrategyConfig,
+) ([]Recommendation, error) {
+	recommendations := make([]Recommendation, 0, len(metrics))
+
+	// Extract parameters from config
+	multiplier := s.defaultMultiplier
+	useP99 := false
+	if config.Parameters != nil {
+		if m, ok := config.Parameters["multiplier"].(float64); ok {
+			multiplier = m
+		}
+		if p99, ok := config.Parameters["useP99"].(bool); ok {
+			useP99 = p99
+		}
+	}
+
+	for _, m := range metrics {
+		rec := Recommendation{
+			ContainerName: m.ContainerName,
+			Method:        "example",
+			Confidence:    0.85,
+			Metadata: map[string]interface{}{
+				"multiplier": multiplier,
+				"useP99":     useP99,
+			},
+		}
+
+		// Calculate CPU requests
+		var cpuMetric *resource.Quantity
+		if useP99 && m.P99CPU != nil {
+			cpuMetric = m.P99CPU
+			rec.Metadata["cpu_source"] = "p99"
+		} else if m.P95CPU != nil {
+			cpuMetric = m.P95CPU
+			rec.Metadata["cpu_source"] = "p95"
+		}
+
+		if cpuMetric != nil {
+			cpuValue := cpuMetric.AsApproximateFloat64() * multiplier
+			rec.Requests.CPU = resource.NewMilliQuantity(
+				int64(cpuValue*1000),
+				resource.DecimalSI,
+			)
+		}
+
+		// Calculate CPU limits (always use P99 with larger multiplier)
+		if m.P99CPU != nil {
+			limitMultiplier := multiplier * 1.5
+			cpuValue := m.P99CPU.AsApproximateFloat64() * limitMultiplier
+			rec.Limits.CPU = resource.NewMilliQuantity(
+				int64(cpuValue*1000),
+				resource.DecimalSI,
+			)
+		}
+
+		// Calculate Memory requests
+		var memMetric *resource.Quantity
+		if useP99 && m.P99Memory != nil {
+			memMetric = m.P99Memory
+			rec.Metadata["memory_source"] = "p99"
+		} else if m.P95Memory != nil {
+			memMetric = m.P95Memory
+			rec.Metadata["memory_source"] = "p95"
+		}
+
+		if memMetric != nil {
+			memValue := memMetric.AsApproximateFloat64() * multiplier
+			rec.Requests.Memory = resource.NewQuantity(
+				int64(memValue),
+				resource.BinarySI,
+			)
+		}
+
+		// Calculate Memory limits
+		if m.P99Memory != nil {
+			limitMultiplier := multiplier * 1.5
+			memValue := m.P99Memory.AsApproximateFloat64() * limitMultiplier
+			rec.Limits.Memory = resource.NewQuantity(
+				int64(memValue),
+				resource.BinarySI,
+			)
+		}
+
+		// Apply safety rails
+		rec.Requests.CPU = s.applySafetyRails(
+			rec.Requests.CPU,
+			config.SafetyRails.MinCPU,
+			config.SafetyRails.MaxCPU,
+			&rec,
+		)
+		rec.Requests.Memory = s.applySafetyRails(
+			rec.Requests.Memory,
+			config.SafetyRails.MinMemory,
+			config.SafetyRails.MaxMemory,
+			&rec,
+		)
+		rec.Limits.CPU = s.applySafetyRails(
+			rec.Limits.CPU,
+			config.SafetyRails.MinCPU,
+			config.SafetyRails.MaxCPU,
+			&rec,
+		)
+		rec.Limits.Memory = s.applySafetyRails(
+			rec.Limits.Memory,
+			config.SafetyRails.MinMemory,
+			config.SafetyRails.MaxMemory,
+			&rec,
+		)
+
+		// Apply resource quota limits
+		if config.ResourceQuota != nil {
+			s.applyQuotaLimits(&rec, config.ResourceQuota)
+		}
+
+		recommendations = append(recommendations, rec)
+	}
+
+	return recommendations, nil
+}
+
+// applySafetyRails ensures the value is within min/max bounds.
+func (s *ExampleStrategy) applySafetyRails(
+	q, min, max *resource.Quantity,
+	rec *Recommendation,
+) *resource.Quantity {
+	if q == nil {
+		return nil
+	}
+
+	result := q.DeepCopy()
+
+	if min != nil && result.Cmp(*min) < 0 {
+		result = min.DeepCopy()
+		rec.Capped = true
+		rec.CappedReason = "capped at minimum safety rail"
+	}
+
+	if max != nil && result.Cmp(*max) > 0 {
+		result = max.DeepCopy()
+		rec.Capped = true
+		rec.CappedReason = "capped at maximum safety rail"
+	}
+
+	return &result
+}
+
+// applyQuotaLimits caps recommendations at quota limits.
+func (s *ExampleStrategy) applyQuotaLimits(
+	rec *Recommendation,
+	quota *ResourceQuotaConfig,
+) {
+	if quota == nil {
+		return
+	}
+
+	if quota.CPULimit != nil {
+		if rec.Requests.CPU != nil && rec.Requests.CPU.Cmp(*quota.CPULimit) > 0 {
+			cpuCopy := quota.CPULimit.DeepCopy()
+			rec.Requests.CPU = &cpuCopy
+			rec.Capped = true
+			rec.CappedReason = "capped at ResourceQuota CPU limit"
+		}
+		if rec.Limits.CPU != nil && rec.Limits.CPU.Cmp(*quota.CPULimit) > 0 {
+			cpuCopy := quota.CPULimit.DeepCopy()
+			rec.Limits.CPU = &cpuCopy
+			rec.Capped = true
+			rec.CappedReason = "capped at ResourceQuota CPU limit"
+		}
+	}
+
+	if quota.MemoryLimit != nil {
+		if rec.Requests.Memory != nil && rec.Requests.Memory.Cmp(*quota.MemoryLimit) > 0 {
+			memCopy := quota.MemoryLimit.DeepCopy()
+			rec.Requests.Memory = &memCopy
+			rec.Capped = true
+			rec.CappedReason = "capped at ResourceQuota memory limit"
+		}
+		if rec.Limits.Memory != nil && rec.Limits.Memory.Cmp(*quota.MemoryLimit) > 0 {
+			memCopy := quota.MemoryLimit.DeepCopy()
+			rec.Limits.Memory = &memCopy
+			rec.Capped = true
+			rec.CappedReason = "capped at ResourceQuota memory limit"
+		}
+	}
+}
+
+// ValidateConfig validates the strategy configuration.
+func (s *ExampleStrategy) ValidateConfig(config StrategyConfig) error {
+	// Intent is optional now (can use FitProfile instead)
+	return nil
+}
+
+// ValidateFitProfileParameters validates FitProfile parameters.
+func (s *ExampleStrategy) ValidateFitProfileParameters(parameters map[string]interface{}) error {
+	if parameters == nil {
+		return nil // Parameters are optional
+	}
+
+	// Validate multiplier
+	if multiplier, ok := parameters["multiplier"].(float64); ok {
+		if multiplier < 0.1 || multiplier > 10.0 {
+			return fmt.Errorf("multiplier must be between 0.1 and 10.0, got %f", multiplier)
+		}
+	}
+
+	// Validate useP99
+	if useP99, ok := parameters["useP99"].(bool); ok {
+		_ = useP99 // Just check it's a boolean
+	}
+
+	return nil
+}
+
+// GetDefaultFitProfileSpec returns the default FitProfile spec.
+func (s *ExampleStrategy) GetDefaultFitProfileSpec() FitProfileSpec {
+	exampleParams := map[string]interface{}{
+		"multiplier": 1.3,
+		"useP99":     false,
+	}
+
+	var paramsSchema map[string]interface{}
+	json.Unmarshal([]byte(`{
+		"type": "object",
+		"properties": {
+			"multiplier": {
+				"type": "number",
+				"description": "Multiplier for resource recommendations",
+				"minimum": 0.1,
+				"maximum": 10.0,
+				"default": 1.3
+			},
+			"useP99": {
+				"type": "boolean",
+				"description": "Use P99 instead of P95 for requests",
+				"default": false
+			}
+		}
+	}`), &paramsSchema)
+
+	return FitProfileSpec{
+		Strategy:         "example",
+		DisplayName:      "Example Strategy",
+		Description:      "An example custom strategy that uses multipliers",
+		ParametersSchema: paramsSchema,
+		ExampleParameters: exampleParams,
+	}
+}

@@ -1,0 +1,22 @@
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: FitProfile
+metadata:
+  name: dsp-fft
+  namespace: default
+spec:
+  strategy: dsp
+  displayName: "DSP FFT Prediction"
+  description: "Uses FFT-based frequency analysis to predict future resource needs"
+  parameters:
+    method: fft
+    marginFraction: 0.2
+    lowAmplitudeThreshold: 1.0
+    highFrequencyThreshold: 0.05
+    minNumOfSpectrumItems: 10
+    maxNumOfSpectrumItems: 20
+    enablePeakDetection: true
+    enableNormalization: false
+  priority: 0
+  labels:
+    strategy: dsp
+    method: fft

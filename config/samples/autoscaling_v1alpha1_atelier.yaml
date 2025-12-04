@@ -1,0 +1,9 @@
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: Atelier
+metadata:
+  labels:
+    app.kubernetes.io/name: sartorproj
+    app.kubernetes.io/managed-by: kustomize
+  name: atelier-sample
+spec:
+  # TODO(user): Add fields here

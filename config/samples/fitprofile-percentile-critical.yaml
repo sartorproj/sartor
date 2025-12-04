@@ -1,0 +1,20 @@
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: FitProfile
+metadata:
+  name: percentile-critical
+  namespace: default
+spec:
+  strategy: percentile
+  displayName: "Critical Percentile"
+  description: "Conservative optimization for critical workloads with large safety buffers"
+  parameters:
+    requestsBufferPercent: 40
+    limitsBufferPercent: 50
+    maxChangePercent: 30
+  priority: 0
+  labels:
+    intent: critical
+    strategy: percentile
+  safetyRailsOverride:
+    minCPU: "100m"
+    minMemory: "128Mi"

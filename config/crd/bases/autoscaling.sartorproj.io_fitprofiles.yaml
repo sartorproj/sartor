@@ -1,0 +1,222 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: fitprofiles.autoscaling.sartorproj.io
+spec:
+  group: autoscaling.sartorproj.io
+  names:
+    kind: FitProfile
+    listKind: FitProfileList
+    plural: fitprofiles
+    singular: fitprofile
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.strategy
+      name: Strategy
+      type: string
+    - jsonPath: .spec.displayName
+      name: Display Name
+      type: string
+    - jsonPath: .status.parametersValid
+      name: Valid
+      type: boolean
+    - jsonPath: .status.usageCount
+      name: Usage
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          FitProfile is the Schema for the fitprofiles API.
+          It defines a reusable optimization profile that can be referenced by Tailorings.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Spec defines the desired state of FitProfile.
+            properties:
+              description:
+                description: Description provides a description of this profile's
+                  optimization approach.
+                type: string
+              displayName:
+                description: DisplayName is a human-readable name for this profile.
+                type: string
+              labels:
+                additionalProperties:
+                  type: string
+                description: Labels are key-value pairs for categorizing profiles.
+                type: object
+              parameters:
+                description: |-
+                  Parameters contains strategy-specific configuration parameters.
+                  The schema depends on the strategy:
+                  - For "percentile": requestsBufferPercent, limitsBufferPercent, maxChangePercent
+                  - For "dsp": method, marginFraction, lowAmplitudeThreshold, etc.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              priority:
+                default: 0
+                description: |-
+                  Priority determines the order when multiple profiles match.
+                  Higher priority profiles are preferred. Default is 0.
+                format: int32
+                type: integer
+              safetyRailsOverride:
+                description: |-
+                  SafetyRailsOverride allows overriding global safety rails for this profile.
+                  If not set, uses the Atelier's global safety rails.
+                properties:
+                  maxCPU:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MaxCPU is the maximum CPU request that Sartor will
+                      recommend.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  maxMemory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MaxMemory is the maximum memory request that Sartor
+                      will recommend.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  minCPU:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MinCPU is the minimum CPU request that Sartor will
+                      recommend.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  minMemory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MinMemory is the minimum memory request that Sartor
+                      will recommend.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                type: object
+              strategy:
+                description: |-
+                  Strategy is the recommendation strategy this profile targets.
+                  Must match a registered strategy name (e.g., "percentile", "dsp").
+                type: string
+            required:
+            - strategy
+            type: object
+          status:
+            description: Status defines the observed state of FitProfile.
+            properties:
+              conditions:
+                description: Conditions represent the current state of the FitProfile.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastValidated:
+                description: LastValidated is when the profile was last validated.
+                format: date-time
+                type: string
+              parametersValid:
+                description: ParametersValid indicates if the parameters are valid
+                  for the strategy.
+                type: boolean
+              strategyValid:
+                description: StrategyValid indicates if the referenced strategy exists
+                  and is valid.
+                type: boolean
+              usageCount:
+                description: UsageCount is the number of Tailorings using this profile.
+                format: int32
+                type: integer
+              validationMessage:
+                description: ValidationMessage contains details about validation errors.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,79 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  - pods
+  - resourcequotas
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  - deployments
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - applications
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - autoscaling
+  resources:
+  - verticalpodautoscalers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - autoscaling.sartorproj.io
+  resources:
+  - ateliers
+  - fitprofiles
+  - tailorings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - autoscaling.sartorproj.io
+  resources:
+  - ateliers/finalizers
+  - fitprofiles/finalizers
+  - tailorings/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - autoscaling.sartorproj.io
+  resources:
+  - ateliers/status
+  - fitprofiles/status
+  - tailorings/status
+  verbs:
+  - get
+  - patch
+  - update

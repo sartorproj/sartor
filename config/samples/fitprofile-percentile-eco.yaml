@@ -1,0 +1,17 @@
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: FitProfile
+metadata:
+  name: percentile-eco
+  namespace: default
+spec:
+  strategy: percentile
+  displayName: "Eco Percentile"
+  description: "Aggressive optimization for cost savings using minimal buffers"
+  parameters:
+    requestsBufferPercent: 10
+    limitsBufferPercent: 20
+    maxChangePercent: 100
+  priority: 0
+  labels:
+    intent: eco
+    strategy: percentile

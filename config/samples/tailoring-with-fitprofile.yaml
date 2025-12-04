@@ -1,0 +1,20 @@
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: Tailoring
+metadata:
+  name: example-tailoring-fitprofile
+  namespace: default
+spec:
+  target:
+    kind: Deployment
+    name: my-app
+  # Use FitProfile instead of legacy Intent/Strategy fields
+  fitProfileRef:
+    name: percentile-balanced
+    namespace: default  # Optional, defaults to Tailoring's namespace
+  writeBack:
+    repository: https://github.com/example/repo.git
+    path: k8s/deployment.yaml
+    branch: main
+    format: raw
+  analysisWindow: 7d
+  paused: false

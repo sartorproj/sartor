@@ -1,0 +1,433 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: tailorings.autoscaling.sartorproj.io
+spec:
+  group: autoscaling.sartorproj.io
+  names:
+    kind: Tailoring
+    listKind: TailoringList
+    plural: tailorings
+    singular: tailoring
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.target.name
+      name: Target
+      type: string
+    - jsonPath: .spec.target.kind
+      name: Kind
+      type: string
+    - jsonPath: .spec.fitProfileRef.name
+      name: FitProfile
+      type: string
+    - jsonPath: .spec.paused
+      name: Paused
+      type: boolean
+    - jsonPath: .status.vpaDetected
+      name: VPA
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Tailoring is the Schema for the tailorings API.
+          It defines the optimization settings for a specific workload.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Spec defines the desired state of Tailoring.
+            properties:
+              analysisWindow:
+                description: |-
+                  AnalysisWindow is the time window for metrics analysis.
+                  Overrides the Atelier's defaultAnalysisWindow.
+                type: string
+              excludeContainers:
+                description: ExcludeContainers is a list of container names to exclude
+                  from optimization.
+                items:
+                  type: string
+                type: array
+              fitProfileRef:
+                description: |-
+                  FitProfileRef references a FitProfile to use for optimization.
+                  FitProfile defines the strategy and strategy-specific configuration.
+                properties:
+                  name:
+                    description: Name is the name of the FitProfile to use.
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the namespace of the FitProfile.
+                      If not specified, uses the same namespace as the Tailoring.
+                    type: string
+                required:
+                - name
+                type: object
+              paused:
+                default: false
+                description: |-
+                  Paused stops Sartor from creating new Cuts for this Tailoring.
+                  Recommendations are still calculated and shown in status.
+                type: boolean
+              target:
+                description: Target identifies the workload to optimize.
+                properties:
+                  apiVersion:
+                    default: apps/v1
+                    description: APIVersion is the API version of the target resource.
+                    type: string
+                  kind:
+                    description: Kind is the kind of the target resource (Deployment,
+                      StatefulSet, etc.).
+                    enum:
+                    - Deployment
+                    - StatefulSet
+                    - DaemonSet
+                    type: string
+                  name:
+                    description: Name is the name of the target resource.
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              writeBack:
+                description: WriteBack defines how to write recommendations back to
+                  Git.
+                properties:
+                  branch:
+                    description: Branch is the target branch for PRs. Defaults to
+                      Atelier's prSettings.baseBranch.
+                    type: string
+                  helmValuePath:
+                    description: |-
+                      HelmValuePath is the path within values.yaml to the resource settings.
+                      Only used when Type is "helm". Example: "resources" or "deployment.resources".
+                    type: string
+                  path:
+                    description: Path is the path to the file to modify within the
+                      repository.
+                    type: string
+                  repository:
+                    description: Repository is the Git repository URL (e.g., "github.com/org/repo").
+                    type: string
+                  type:
+                    description: Type is the write-back strategy type (raw, helm,
+                      kustomize).
+                    enum:
+                    - raw
+                    - helm
+                    - kustomize
+                    type: string
+                required:
+                - path
+                - repository
+                - type
+                type: object
+            required:
+            - fitProfileRef
+            - target
+            - writeBack
+            type: object
+          status:
+            description: Status defines the observed state of Tailoring.
+            properties:
+              argoCDApp:
+                description: ArgoCDApp is the name of the ArgoCD Application managing
+                  this workload.
+                type: string
+              argoCDSyncTime:
+                description: ArgoCDSyncTime is when the ArgoCD sync was triggered.
+                format: date-time
+                type: string
+              argoCDSyncTriggered:
+                description: ArgoCDSyncTriggered indicates if ArgoCD sync was triggered
+                  after merge.
+                type: boolean
+              branchName:
+                description: BranchName is the name of the branch created for this
+                  recommendation.
+                type: string
+              commitSha:
+                description: CommitSHA is the SHA of the commit created for this recommendation.
+                type: string
+              conditions:
+                description: Conditions represent the current state of the Tailoring
+                  resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              ignored:
+                description: |-
+                  Ignored indicates the PR was closed with a sartor-ignore label.
+                  When true, the Tailoring should be paused.
+                type: boolean
+              lastAnalysis:
+                description: LastAnalysis contains the results of the most recent
+                  analysis.
+                properties:
+                  analysisWindow:
+                    description: AnalysisWindow is the time window used for analysis.
+                    type: string
+                  containers:
+                    description: Containers contains per-container recommendations.
+                    items:
+                      description: ContainerRecommendation holds recommendations for
+                        a specific container.
+                      properties:
+                        current:
+                          description: Current is the current resource configuration.
+                          properties:
+                            limits:
+                              description: Limits describes the maximum amount of
+                                compute resources allowed.
+                              properties:
+                                cpu:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: CPU is the CPU resource value.
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                memory:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: Memory is the memory resource value.
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                              type: object
+                            requests:
+                              description: Requests describes the minimum amount of
+                                compute resources required.
+                              properties:
+                                cpu:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: CPU is the CPU resource value.
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                memory:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: Memory is the memory resource value.
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                              type: object
+                          type: object
+                        name:
+                          description: Name is the name of the container.
+                          type: string
+                        p95CPU:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: P95CPU is the observed P95 CPU usage.
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        p95Memory:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: P95Memory is the observed P95 memory usage.
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        p99CPU:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: P99CPU is the observed P99 CPU usage.
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        p99Memory:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: P99Memory is the observed P99 memory usage.
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        recommended:
+                          description: Recommended is the recommended resource configuration.
+                          properties:
+                            limits:
+                              description: Limits describes the maximum amount of
+                                compute resources allowed.
+                              properties:
+                                cpu:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: CPU is the CPU resource value.
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                memory:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: Memory is the memory resource value.
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                              type: object
+                            requests:
+                              description: Requests describes the minimum amount of
+                                compute resources required.
+                              properties:
+                                cpu:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: CPU is the CPU resource value.
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                memory:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: Memory is the memory resource value.
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                              type: object
+                          type: object
+                      required:
+                      - current
+                      - name
+                      - recommended
+                      type: object
+                    type: array
+                  savingsEstimate:
+                    description: SavingsEstimate is the estimated monthly cost savings
+                      (if OpenCost is enabled).
+                    type: string
+                  timestamp:
+                    description: Timestamp is when the analysis was performed.
+                    format: date-time
+                    type: string
+                required:
+                - analysisWindow
+                - timestamp
+                type: object
+              lastPRUpdateTime:
+                description: LastPRUpdateTime is when the PR was last updated.
+                format: date-time
+                type: string
+              mergedAt:
+                description: MergedAt is when the PR was merged.
+                format: date-time
+                type: string
+              nextAnalysisTime:
+                description: NextAnalysisTime is when the next analysis is scheduled.
+                format: date-time
+                type: string
+              prMessage:
+                description: PRMessage contains any error or status message.
+                type: string
+              prNumber:
+                description: PRNumber is the number of the Pull Request.
+                type: integer
+              prState:
+                description: PRState is the current state of the Pull Request.
+                enum:
+                - pending
+                - open
+                - merged
+                - closed
+                type: string
+              prUrl:
+                description: PRUrl is the URL of the Pull Request.
+                type: string
+              targetFound:
+                description: TargetFound indicates if the target workload exists.
+                type: boolean
+              vpaDetected:
+                description: VPADetected indicates if a VPA exists for the target
+                  workload.
+                type: boolean
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,17 @@
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: FitProfile
+metadata:
+  name: percentile-balanced
+  namespace: default
+spec:
+  strategy: percentile
+  displayName: "Balanced Percentile"
+  description: "Balanced optimization using P95 for requests and P99 for limits with moderate buffers"
+  parameters:
+    requestsBufferPercent: 20
+    limitsBufferPercent: 30
+    maxChangePercent: 50
+  priority: 0
+  labels:
+    intent: balanced
+    strategy: percentile
