@@ -129,32 +129,32 @@ flowchart TB
             FitProfile["📐 FitProfile<br/><i>Strategy Config</i>"]
             Tailoring["✂️ Tailoring<br/><i>Workload Config</i>"]
         end
-        
+
         subgraph Workloads["Target Workloads"]
             Deploy["Deployment"]
             STS["StatefulSet"]
             DS["DaemonSet"]
         end
-        
+
         subgraph Sartor["Sartor Components"]
             Controller["🎛️ Controller<br/><i>Reconciliation Loop</i>"]
             Server["🖥️ Server<br/><i>REST API + MCP</i>"]
         end
     end
-    
+
     subgraph External["External Services"]
         Prometheus["📊 Prometheus<br/><i>Metrics</i>"]
         OpenCost["💰 OpenCost<br/><i>Cost Data</i>"]
-        
+
         subgraph Git["Git Providers"]
             GitHub["GitHub"]
             GitLab["GitLab"]
             Bitbucket["Bitbucket"]
         end
-        
+
         ArgoCD["🔄 ArgoCD<br/><i>GitOps Sync</i>"]
     end
-    
+
     subgraph Clients["Clients"]
         UI["🌐 Web UI"]
         AI["🤖 AI Agents<br/><i>MCP Protocol</i>"]
@@ -165,17 +165,17 @@ flowchart TB
     OpenCost -->|"Cost<br/>Analytics"| Controller
     Controller -->|"Watch"| Workloads
     Controller -->|"Reconcile"| CRDs
-    
+
     %% GitOps Flow
     Controller -->|"Create PR"| Git
     Git -->|"Merge"| ArgoCD
     ArgoCD -->|"Sync"| Workloads
-    
+
     %% API Flow
     Server -->|"Query"| Controller
     UI --> Server
     AI --> Server
-    
+
     %% Styling
     style Sartor fill:#e1f5fe
     style CRDs fill:#fff3e0

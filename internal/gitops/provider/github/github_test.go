@@ -65,9 +65,9 @@ func TestNew(t *testing.T) {
 }
 
 func TestProvider_Name(t *testing.T) {
-	provider, err := New(Config{Token: "test-token"})
+	p, err := New(Config{Token: "test-token"})
 	require.NoError(t, err)
-	assert.Equal(t, "github", provider.Name())
+	assert.Equal(t, "github", p.Name())
 }
 
 func TestParseRepository(t *testing.T) {
@@ -252,12 +252,12 @@ func TestProvider_CheckConnection_Success(t *testing.T) {
 
 	// Create provider with mock server
 	// Note: This requires the provider to use a custom base URL
-	provider, err := New(Config{
+	p, err := New(Config{
 		Token:   "test-token",
 		BaseURL: server.URL,
 	})
 	require.NoError(t, err)
 
 	// The actual test would need to mock the GitHub client properly
-	assert.NotNil(t, provider)
+	assert.NotNil(t, p)
 }
