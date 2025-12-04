@@ -218,3 +218,223 @@ func resourcePtr(s string) *resource.Quantity {
 	q := resource.MustParse(s)
 	return &q
 }
+
+func TestHelmWriter_UpdateValues_InvalidYAML(t *testing.T) {
+	writer := NewHelmWriter()
+	_, err := writer.UpdateValues([]byte("invalid: yaml: : :"), []ResourceUpdate{}, "resources")
+	assert.Error(t, err)
+}
+
+func TestHelmWriter_UpdateValues_InvalidDocument(t *testing.T) {
+	writer := NewHelmWriter()
+	_, err := writer.UpdateValues([]byte(""), []ResourceUpdate{}, "resources")
+	assert.Error(t, err)
+}
+
+func TestHelmWriter_UpdateValues_PathNotFound(t *testing.T) {
+	inputYAML := `image:
+  repository: nginx
+`
+	writer := NewHelmWriter()
+	_, err := writer.UpdateValues([]byte(inputYAML), []ResourceUpdate{
+		{ContainerName: "main", Requests: &ResourceValues{CPU: resourcePtr("100m")}},
+	}, "nonexistent.path.resources")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "path not found")
+}
+
+func TestHelmWriter_UpdateValues_CreateResourcesSection(t *testing.T) {
+	inputYAML := `image:
+  repository: nginx
+  tag: latest
+`
+	writer := NewHelmWriter()
+	output, err := writer.UpdateValues([]byte(inputYAML), []ResourceUpdate{
+		{
+			ContainerName: "main",
+			Requests: &ResourceValues{
+				CPU:    resourcePtr("100m"),
+				Memory: resourcePtr("128Mi"),
+			},
+		},
+	}, "resources")
+	assert.NoError(t, err)
+	assert.Contains(t, string(output), "resources")
+	assert.Contains(t, string(output), "100m")
+	assert.Contains(t, string(output), "128Mi")
+}
+
+func TestHelmWriter_UpdateValues_OnlyLimits(t *testing.T) {
+	inputYAML := `image:
+  repository: nginx
+resources:
+  requests:
+    cpu: 100m
+`
+	writer := NewHelmWriter()
+	output, err := writer.UpdateValues([]byte(inputYAML), []ResourceUpdate{
+		{
+			ContainerName: "main",
+			Limits: &ResourceValues{
+				CPU:    resourcePtr("500m"),
+				Memory: resourcePtr("512Mi"),
+			},
+		},
+	}, "resources")
+	assert.NoError(t, err)
+	assert.Contains(t, string(output), "limits")
+	assert.Contains(t, string(output), "500m")
+}
+
+func TestHelmWriter_UpdateValues_EmptyUpdates(t *testing.T) {
+	inputYAML := `image:
+  repository: nginx
+resources:
+  requests:
+    cpu: 100m
+`
+	writer := NewHelmWriter()
+	output, err := writer.UpdateValues([]byte(inputYAML), []ResourceUpdate{}, "resources")
+	assert.NoError(t, err)
+	assert.Contains(t, string(output), "100m")
+}
+
+func TestHelmWriter_UpdateValuesMultiContainer(t *testing.T) {
+	inputYAML := `app:
+  resources:
+    requests:
+      cpu: 100m
+worker:
+  resources:
+    requests:
+      cpu: 50m
+`
+	writer := NewHelmWriter()
+	output, err := writer.UpdateValuesMultiContainer([]byte(inputYAML), []ResourceUpdate{
+		{
+			ContainerName: "app",
+			Requests:      &ResourceValues{CPU: resourcePtr("200m")},
+		},
+		{
+			ContainerName: "worker",
+			Requests:      &ResourceValues{CPU: resourcePtr("100m")},
+		},
+	}, map[string]string{
+		"app":    "app.resources",
+		"worker": "worker.resources",
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, string(output), "200m")
+	assert.Contains(t, string(output), "100m")
+}
+
+func TestHelmWriter_UpdateValuesMultiContainer_InvalidYAML(t *testing.T) {
+	writer := NewHelmWriter()
+	_, err := writer.UpdateValuesMultiContainer([]byte("invalid: yaml: : :"), []ResourceUpdate{}, map[string]string{})
+	assert.Error(t, err)
+}
+
+func TestHelmWriter_UpdateValuesMultiContainer_SkipUnmappedContainers(t *testing.T) {
+	inputYAML := `app:
+  resources:
+    requests:
+      cpu: 100m
+`
+	writer := NewHelmWriter()
+	output, err := writer.UpdateValuesMultiContainer([]byte(inputYAML), []ResourceUpdate{
+		{
+			ContainerName: "app",
+			Requests:      &ResourceValues{CPU: resourcePtr("200m")},
+		},
+		{
+			ContainerName: "unmapped",
+			Requests:      &ResourceValues{CPU: resourcePtr("50m")},
+		},
+	}, map[string]string{
+		"app": "app.resources",
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, string(output), "200m")
+}
+
+func TestHelmWriter_UpdateValuesMultiContainer_CreatePath(t *testing.T) {
+	inputYAML := `image:
+  repository: nginx
+`
+	writer := NewHelmWriter()
+	output, err := writer.UpdateValuesMultiContainer([]byte(inputYAML), []ResourceUpdate{
+		{
+			ContainerName: "app",
+			Requests:      &ResourceValues{CPU: resourcePtr("200m")},
+		},
+	}, map[string]string{
+		"app": "app.resources",
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, string(output), "app")
+	assert.Contains(t, string(output), "resources")
+	assert.Contains(t, string(output), "200m")
+}
+
+func TestHelmWriter_DetectHelmStructure_InvalidYAML(t *testing.T) {
+	writer := NewHelmWriter()
+	_, err := writer.DetectHelmStructure([]byte("invalid: yaml: : :"))
+	assert.Error(t, err)
+}
+
+func TestHelmWriter_DetectHelmStructure_EmptyDocument(t *testing.T) {
+	writer := NewHelmWriter()
+	_, err := writer.DetectHelmStructure([]byte(""))
+	assert.Error(t, err)
+}
+
+func TestHelmWriter_DetectHelmStructure_TopLevelResources(t *testing.T) {
+	inputYAML := `resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+`
+	writer := NewHelmWriter()
+	structure, err := writer.DetectHelmStructure([]byte(inputYAML))
+	assert.NoError(t, err)
+	assert.NotEmpty(t, structure)
+	// Should detect "main" container for top-level resources
+	_, exists := structure["main"]
+	assert.True(t, exists)
+}
+
+func TestHelmWriter_DetectHelmStructure_MultipleResources(t *testing.T) {
+	inputYAML := `app:
+  resources:
+    requests:
+      cpu: 100m
+worker:
+  resources:
+    requests:
+      cpu: 50m
+sidecar:
+  resources:
+    requests:
+      cpu: 25m
+`
+	writer := NewHelmWriter()
+	structure, err := writer.DetectHelmStructure([]byte(inputYAML))
+	assert.NoError(t, err)
+	assert.Len(t, structure, 3)
+}
+
+func TestHelmWriter_DetectHelmStructure_DeeplyNested(t *testing.T) {
+	inputYAML := `deployment:
+  spec:
+    template:
+      containers:
+        main:
+          resources:
+            requests:
+              cpu: 100m
+`
+	writer := NewHelmWriter()
+	structure, err := writer.DetectHelmStructure([]byte(inputYAML))
+	assert.NoError(t, err)
+	assert.NotEmpty(t, structure)
+}

@@ -342,3 +342,319 @@ func TestApplication_JSON(t *testing.T) {
 	assert.Equal(t, app.SyncStatus, decoded.SyncStatus)
 	assert.Equal(t, app.Labels["team"], decoded.Labels["team"])
 }
+
+func TestClient_ListApplications_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		ServerURL: server.URL,
+		Token:     "test-token",
+	}, nil)
+
+	apps, err := client.ListApplications(context.Background())
+	assert.Error(t, err)
+	assert.Nil(t, apps)
+	assert.Contains(t, err.Error(), "500")
+}
+
+func TestClient_ListApplications_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("invalid json"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		ServerURL: server.URL,
+		Token:     "test-token",
+	}, nil)
+
+	apps, err := client.ListApplications(context.Background())
+	assert.Error(t, err)
+	assert.Nil(t, apps)
+	assert.Contains(t, err.Error(), "decode")
+}
+
+func TestClient_GetApplication_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not found"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		ServerURL: server.URL,
+		Token:     "test-token",
+	}, nil)
+
+	app, err := client.GetApplication(context.Background(), "nonexistent", "argocd")
+	assert.Error(t, err)
+	assert.Nil(t, app)
+	assert.Contains(t, err.Error(), "404")
+}
+
+func TestClient_GetApplication_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("invalid json"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		ServerURL: server.URL,
+		Token:     "test-token",
+	}, nil)
+
+	app, err := client.GetApplication(context.Background(), "my-app", "argocd")
+	assert.Error(t, err)
+	assert.Nil(t, app)
+	assert.Contains(t, err.Error(), "decode")
+}
+
+func TestClient_Sync_DryRun(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req SyncRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		assert.True(t, req.DryRun)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		ServerURL: server.URL,
+		Token:     "test-token",
+	}, nil)
+
+	result, err := client.Sync(context.Background(), "my-app", "argocd", SyncRequest{DryRun: true})
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+func TestClient_Sync_NetworkError(t *testing.T) {
+	client := NewClient(Config{
+		ServerURL: "http://localhost:99999",
+		Token:     "test-token",
+		Timeout:   100 * time.Millisecond,
+	}, nil)
+
+	result, err := client.Sync(context.Background(), "my-app", "argocd", SyncRequest{})
+	assert.Error(t, err)
+	assert.Nil(t, result)
+}
+
+func TestClient_Refresh_Error(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		ServerURL: server.URL,
+		Token:     "bad-token",
+	}, nil)
+
+	result, err := client.Refresh(context.Background(), "my-app", "argocd", false)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "401")
+}
+
+func TestClient_DetectApplication_NoAPINoK8s(t *testing.T) {
+	// Client without API credentials or k8s client
+	client := NewClient(Config{}, nil)
+
+	app, err := client.DetectApplication(context.Background(), "default", "my-workload")
+	assert.Error(t, err)
+	assert.Nil(t, app)
+	assert.Contains(t, err.Error(), "could not detect")
+}
+
+func TestClient_ListApplications_NoServer(t *testing.T) {
+	// Client without server URL and no k8s client
+	client := NewClient(Config{}, nil)
+
+	apps, err := client.ListApplications(context.Background())
+	assert.Error(t, err)
+	assert.Nil(t, apps)
+	assert.Contains(t, err.Error(), "no Kubernetes client")
+}
+
+func TestSyncRequest_JSON(t *testing.T) {
+	req := SyncRequest{
+		Revision: "abc123",
+		Prune:    true,
+		DryRun:   false,
+	}
+
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	var decoded SyncRequest
+	err = json.Unmarshal(data, &decoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, req.Revision, decoded.Revision)
+	assert.Equal(t, req.Prune, decoded.Prune)
+	assert.Equal(t, req.DryRun, decoded.DryRun)
+}
+
+func TestSyncResult_JSON(t *testing.T) {
+	result := SyncResult{
+		Status:   "Synced",
+		Message:  "Sync completed",
+		Revision: "abc123",
+	}
+
+	data, err := json.Marshal(result)
+	require.NoError(t, err)
+
+	var decoded SyncResult
+	err = json.Unmarshal(data, &decoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, result.Status, decoded.Status)
+	assert.Equal(t, result.Message, decoded.Message)
+	assert.Equal(t, result.Revision, decoded.Revision)
+}
+
+func TestRefreshResult_JSON(t *testing.T) {
+	result := RefreshResult{
+		Success: true,
+		Message: "Refresh completed",
+	}
+
+	data, err := json.Marshal(result)
+	require.NoError(t, err)
+
+	var decoded RefreshResult
+	err = json.Unmarshal(data, &decoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, result.Success, decoded.Success)
+	assert.Equal(t, result.Message, decoded.Message)
+}
+
+func TestConfig_Fields(t *testing.T) {
+	cfg := Config{
+		ServerURL:          "https://argocd.example.com",
+		Token:              "secret-token",
+		InsecureSkipVerify: true,
+		Timeout:            60 * time.Second,
+	}
+
+	assert.Equal(t, "https://argocd.example.com", cfg.ServerURL)
+	assert.Equal(t, "secret-token", cfg.Token)
+	assert.True(t, cfg.InsecureSkipVerify)
+	assert.Equal(t, 60*time.Second, cfg.Timeout)
+}
+
+func TestClient_DefaultTimeout(t *testing.T) {
+	cfg := Config{
+		ServerURL: "https://argocd.example.com",
+		Token:     "test-token",
+		// Timeout not set - should default to 30s
+	}
+
+	client := NewClient(cfg, nil)
+	assert.NotNil(t, client)
+}
+
+func TestClient_findApplicationByResource(t *testing.T) {
+	mockResponse := `{
+		"items": [
+			{
+				"metadata": {
+					"name": "my-app",
+					"namespace": "argocd"
+				},
+				"spec": {
+					"project": "default",
+					"source": {
+						"repoURL": "https://github.com/org/repo",
+						"path": "apps/my-namespace",
+						"targetRevision": "main"
+					}
+				},
+				"status": {
+					"sync": {"status": "Synced"},
+					"health": {"status": "Healthy"}
+				}
+			}
+		]
+	}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(mockResponse))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		ServerURL: server.URL,
+		Token:     "test-token",
+	}, nil)
+
+	// Test finding application by path containing namespace
+	app, err := client.findApplicationByResource(context.Background(), "my-namespace", "my-workload")
+	assert.NoError(t, err)
+	assert.NotNil(t, app)
+	assert.Equal(t, "my-app", app.Name)
+}
+
+func TestClient_findApplicationByResource_NotFound(t *testing.T) {
+	mockResponse := `{
+		"items": [
+			{
+				"metadata": {
+					"name": "other-app",
+					"namespace": "argocd"
+				},
+				"spec": {
+					"project": "default",
+					"source": {
+						"repoURL": "https://github.com/org/repo",
+						"path": "apps/other-namespace",
+						"targetRevision": "main"
+					}
+				},
+				"status": {
+					"sync": {"status": "Synced"},
+					"health": {"status": "Healthy"}
+				}
+			}
+		]
+	}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(mockResponse))
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{
+		ServerURL: server.URL,
+		Token:     "test-token",
+	}, nil)
+
+	// Should not find application for unrelated namespace
+	app, err := client.findApplicationByResource(context.Background(), "my-namespace", "my-workload")
+	assert.Error(t, err)
+	assert.Nil(t, app)
+	assert.Contains(t, err.Error(), "no ArgoCD application found")
+}
+
+func TestConstants(t *testing.T) {
+	assert.Equal(t, "argocd.argoproj.io/instance", ArgoCDAppLabel)
+	assert.Equal(t, "argocd.argoproj.io/tracking-id", ArgoCDAppAnnotation)
+	assert.Equal(t, "argocd.argoproj.io/sync-wave", ArgoCDSyncAnnotation)
+	assert.Equal(t, "argoproj.io", ApplicationGroup)
+	assert.Equal(t, "v1alpha1", ApplicationVersion)
+	assert.Equal(t, "Application", ApplicationKind)
+}

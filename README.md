@@ -2,10 +2,6 @@
 
 <div align="center">
 
-![Sartor Logo](docs/images/logo.png)
-
-**Intelligent Kubernetes Resource Optimization with GitOps**
-
 [![CI](https://github.com/sartorproj/sartor/workflows/CI/badge.svg)](https://github.com/sartorproj/sartor/actions/workflows/ci.yml)
 [![Release](https://github.com/sartorproj/sartor/workflows/Release/badge.svg)](https://github.com/sartorproj/sartor/actions/workflows/release.yml)
 [![Security](https://github.com/sartorproj/sartor/workflows/Security/badge.svg)](https://github.com/sartorproj/sartor/actions/workflows/security.yml)
@@ -14,6 +10,10 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Go Version](https://img.shields.io/badge/Go-%3E%3D1.24-blue)](https://golang.org/)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-%3E%3D1.11-blue)](https://kubernetes.io/)
+
+![Sartor Logo](docs/images/logo.png)
+
+**Intelligent Kubernetes Resource Optimization with GitOps**
 
 </div>
 
@@ -118,20 +118,77 @@ spec:
 
 Sartor consists of two main components:
 
-1. **Controller**: Kubernetes controller that reconciles `Atelier`, `Tailoring`, and `Cut` resources
+1. **Controller**: Kubernetes controller that reconciles `Atelier`, `Tailoring`, and `FitProfile` resources
 2. **Server**: REST API and MCP server for UI and AI agent integration
 
+```mermaid
+flowchart TB
+    subgraph Kubernetes["☸️ Kubernetes Cluster"]
+        subgraph CRDs["Custom Resources"]
+            Atelier["🎨 Atelier<br/><i>Global Config</i>"]
+            FitProfile["📐 FitProfile<br/><i>Strategy Config</i>"]
+            Tailoring["✂️ Tailoring<br/><i>Workload Config</i>"]
+        end
+        
+        subgraph Workloads["Target Workloads"]
+            Deploy["Deployment"]
+            STS["StatefulSet"]
+            DS["DaemonSet"]
+        end
+        
+        subgraph Sartor["Sartor Components"]
+            Controller["🎛️ Controller<br/><i>Reconciliation Loop</i>"]
+            Server["🖥️ Server<br/><i>REST API + MCP</i>"]
+        end
+    end
+    
+    subgraph External["External Services"]
+        Prometheus["📊 Prometheus<br/><i>Metrics</i>"]
+        OpenCost["💰 OpenCost<br/><i>Cost Data</i>"]
+        
+        subgraph Git["Git Providers"]
+            GitHub["GitHub"]
+            GitLab["GitLab"]
+            Bitbucket["Bitbucket"]
+        end
+        
+        ArgoCD["🔄 ArgoCD<br/><i>GitOps Sync</i>"]
+    end
+    
+    subgraph Clients["Clients"]
+        UI["🌐 Web UI"]
+        AI["🤖 AI Agents<br/><i>MCP Protocol</i>"]
+    end
+
+    %% Data Flow
+    Prometheus -->|"CPU/Memory<br/>Metrics"| Controller
+    OpenCost -->|"Cost<br/>Analytics"| Controller
+    Controller -->|"Watch"| Workloads
+    Controller -->|"Reconcile"| CRDs
+    
+    %% GitOps Flow
+    Controller -->|"Create PR"| Git
+    Git -->|"Merge"| ArgoCD
+    ArgoCD -->|"Sync"| Workloads
+    
+    %% API Flow
+    Server -->|"Query"| Controller
+    UI --> Server
+    AI --> Server
+    
+    %% Styling
+    style Sartor fill:#e1f5fe
+    style CRDs fill:#fff3e0
+    style Git fill:#f3e5f5
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│ Prometheus  │────▶│   Sartor     │────▶│ Git Provider│
-│  (Metrics)  │     │  Controller  │     │  (GitHub)   │
-└─────────────┘     └──────────────┘     └─────────────┘
-                            │
-                            ▼
-                    ┌──────────────┐
-                    │   GitOps PR  │
-                    └──────────────┘
-```
+
+### Data Flow
+
+1. **Metrics Collection**: Controller queries Prometheus for CPU/memory usage patterns
+2. **Analysis**: Recommendation engine calculates optimal resources using configured strategy
+3. **PR Creation**: Changes are proposed via Git pull requests (Raw YAML, Helm, or Kustomize)
+4. **GitOps Sync**: After PR merge, ArgoCD automatically syncs changes to the cluster
+5. **OOM Protection**: Controller monitors for OOMKilled events and can auto-patch limits
 
 ## Concepts
 
@@ -233,8 +290,6 @@ limitations under the License.
 ---
 
 <div align="center">
-
-Made with ❤️ by the Sartor team
 
 [Website](https://sartorproj.io) • [Documentation](https://sartorproj.github.io/sartor) • [Blog](https://sartorproj.io/blog)
 
