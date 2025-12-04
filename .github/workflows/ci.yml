@@ -15,50 +15,85 @@ permissions:
   packages: write
 
 jobs:
+  # Stage 1: Validation (runs first, in parallel)
+  manifests:
+    name: Verify Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Generate manifests
+        run: make manifests generate
+
+      - name: Check for changes
+        run: |
+          git diff --exit-code config/
+          git diff --exit-code api/
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
-          cache-dependency-path: 'go.sum'
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@v6
         with:
           version: latest
           args: --timeout=5m
 
+  # Stage 2: Test (depends on manifests and lint)
   test:
     name: Test
+    needs: [manifests, lint]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
-          cache-dependency-path: 'go.sum'
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
       - name: Setup envtest
         run: |
           go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
           setup-envtest use --bin-dir ./bin
 
-      - name: Run unit tests
+      - name: Run tests with coverage
         run: |
           export KUBEBUILDER_ASSETS="$(setup-envtest use -p path)"
-          go test -v -coverprofile=coverage.out ./...
+          go test -v -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+          echo "Total coverage: ${COVERAGE}%"
+          THRESHOLD=50
+          if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+            echo "❌ Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
+            exit 1
+          fi
+          echo "✅ Coverage ${COVERAGE}% meets threshold ${THRESHOLD}%"
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v4
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         with:
           files: coverage.out
@@ -67,18 +102,20 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: ${{ github.repository }}
 
+  # Stage 3: Build (depends on test passing)
   build:
     name: Build
+    needs: [test]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
-          cache-dependency-path: 'go.sum'
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
       - name: Build controller
         run: go build -v -o bin/controller ./cmd/controller
@@ -86,12 +123,14 @@ jobs:
       - name: Build server
         run: go build -v -o bin/server ./cmd/server
 
+  # Stage 4: Docker Build & Push (depends on build, only pushes on main)
   docker:
     name: Docker Build & Push
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -146,47 +185,3 @@ jobs:
           labels: ${{ steps.meta-server.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  envtest:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-          cache-dependency-path: 'go.sum'
-
-      - name: Setup envtest
-        run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-          setup-envtest use --bin-dir ./bin
-
-      - name: Run integration tests
-        run: |
-          export KUBEBUILDER_ASSETS="$(setup-envtest use -p path)"
-          go test -v ./internal/controller/... -coverprofile=coverage-integration.out
-
-  manifests:
-    name: Verify Manifests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-          cache-dependency-path: 'go.sum'
-
-      - name: Generate manifests
-        run: make manifests generate
-
-      - name: Check for changes
-        run: |
-          git diff --exit-code config/
-          git diff --exit-code api/

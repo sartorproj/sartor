@@ -13,133 +13,48 @@ permissions:
   pull-requests: write
 
 jobs:
-  pr-check:
+  pr-validation:
     name: PR Validation
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
 
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-          cache-dependency-path: 'go.sum'
+    - name: Check PR title
+      uses: amannn/action-semantic-pull-request@v6
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        types: |
+          feat
+          fix
+          docs
+          style
+          refactor
+          perf
+          test
+          build
+          ci
+          chore
+          revert
+        scopes: |
+          controller
+          server
+          api
+          gitops
+          recommender
+          metrics
+          docs
+        requireScope: false
+        subjectPattern: ^(?![A-Z]).+$
+        subjectPatternError: |
+          The subject "{subject}" found in the pull request title
+          "{title}" must not start with an uppercase character.
 
-      - name: Check PR title
-        uses: amannn/action-semantic-pull-request@v6
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          types: |
-            feat
-            fix
-            docs
-            style
-            refactor
-            perf
-            test
-            build
-            ci
-            chore
-            revert
-          scopes: |
-            controller
-            server
-            api
-            gitops
-            recommender
-            metrics
-            docs
-          requireScope: false
-          subjectPattern: ^(?![A-Z]).+$
-          subjectPatternError: |
-            The subject "{subject}" found in the pull request title
-            "{title}" must not start with an uppercase character.
-
-      - name: Setup envtest
-        run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-          setup-envtest use --bin-dir ./bin
-
-      - name: Run tests
-        run: |
-          export KUBEBUILDER_ASSETS="$(setup-envtest use -p path)"
-          go test -v -race -coverprofile=coverage.out ./...
-
-      - name: Run linter
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
-          args: --timeout=5m
-
-      - name: Check for breaking changes
-        run: |
-          if git diff origin/main...HEAD --name-only | grep -q "^api/"; then
-            echo "⚠️ API changes detected. Please ensure backward compatibility or document breaking changes."
-          fi
-
-      - name: Verify manifests
-        run: |
-          make manifests generate
-          git diff --exit-code config/ api/ || {
-            echo "❌ Generated files are out of date. Please run 'make manifests generate'"
-            exit 1
-          }
-
-      - name: Check documentation
-        run: |
-          if [ -f README.md ]; then
-            echo "✅ README.md exists"
-          fi
-          
-          # Check for new features without documentation
-          if git diff origin/main...HEAD --name-only | grep -q "^internal/.*\.go$"; then
-            echo "ℹ️ Code changes detected. Please ensure documentation is updated."
-          fi
-
-      - name: Comment PR
-        if: always()
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            
-            const botComment = comments.find(comment => 
-              comment.user.type === 'Bot' && 
-              comment.body.includes('PR Validation Results')
-            );
-            
-            const body = `## PR Validation Results
-            
-            ✅ All checks passed!
-            
-            - [x] PR title follows conventional commits
-            - [x] Tests passing
-            - [x] Linter passing
-            - [x] Manifests up to date
-            - [x] Documentation checked
-            
-            Ready for review! 🚀`;
-            
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: body
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: body
-              });
-            }
+    - name: Check for breaking changes
+      run: |
+        if git diff origin/main...HEAD --name-only | grep -q "^api/"; then
+          echo "⚠️ API changes detected. Please ensure backward compatibility or document breaking changes."
+        fi

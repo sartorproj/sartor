@@ -75,7 +75,7 @@ Past cycles at 6 PM:
   Day 2: 180m
   Day 3: 220m
   Day 4: 190m
-  
+
 Predicted (marginFraction=0.1): 220m * 1.1 = 242m
 ```
 

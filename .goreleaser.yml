@@ -5,93 +5,93 @@ project_name: sartor
 
 before:
   hooks:
-    - go mod tidy
-    - go generate ./...
+  - go mod tidy
+  - go generate ./...
 
 builds:
-  - id: controller
-    main: ./cmd/controller
-    binary: sartor-controller
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    ldflags:
-      - -s -w
-      - -X main.version={{.Version}}
-      - -X main.commit={{.Commit}}
-      - -X main.date={{.Date}}
+- id: controller
+  main: ./cmd/controller
+  binary: sartor-controller
+  env:
+  - CGO_ENABLED=0
+  goos:
+  - linux
+  - darwin
+  goarch:
+  - amd64
+  - arm64
+  ldflags:
+  - -s -w
+  - -X main.version={{.Version}}
+  - -X main.commit={{.Commit}}
+  - -X main.date={{.Date}}
 
-  - id: server
-    main: ./cmd/server
-    binary: sartor-server
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    ldflags:
-      - -s -w
-      - -X main.version={{.Version}}
-      - -X main.commit={{.Commit}}
-      - -X main.date={{.Date}}
+- id: server
+  main: ./cmd/server
+  binary: sartor-server
+  env:
+  - CGO_ENABLED=0
+  goos:
+  - linux
+  - darwin
+  goarch:
+  - amd64
+  - arm64
+  ldflags:
+  - -s -w
+  - -X main.version={{.Version}}
+  - -X main.commit={{.Commit}}
+  - -X main.date={{.Date}}
 
 archives:
-  - id: default
-    format: tar.gz
-    name_template: >-
-      {{ .ProjectName }}_
-      {{- title .Os }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
-    format_overrides:
-      - goos: windows
-        format: zip
-    files:
-      - LICENSE
-      - README.md
-      - config/crd/bases/*
+- id: default
+  format: tar.gz
+  name_template: >-
+    {{ .ProjectName }}_
+    {{- title .Os }}_
+    {{- if eq .Arch "amd64" }}x86_64
+    {{- else if eq .Arch "386" }}i386
+    {{- else }}{{ .Arch }}{{ end }}
+  format_overrides:
+  - goos: windows
+    format: zip
+  files:
+  - LICENSE
+  - README.md
+  - config/crd/bases/*
 
 checksum:
-  name_template: 'checksums.txt'
+  name_template: checksums.txt
 
 snapshot:
-  version_template: "{{ incpatch .Version }}-next"
+  version_template: '{{ incpatch .Version }}-next'
 
 changelog:
   sort: asc
   use: github
   filters:
     exclude:
-      - '^docs:'
-      - '^test:'
-      - '^chore:'
-      - '^ci:'
-      - Merge pull request
-      - Merge branch
+    - '^docs:'
+    - '^test:'
+    - '^chore:'
+    - '^ci:'
+    - Merge pull request
+    - Merge branch
   groups:
-    - title: 'New Features'
-      regexp: "^.*feat[(\\w)]*:+.*$"
-      order: 0
-    - title: 'Bug Fixes'
-      regexp: "^.*fix[(\\w)]*:+.*$"
-      order: 1
-    - title: 'Performance Improvements'
-      regexp: "^.*perf[(\\w)]*:+.*$"
-      order: 2
-    - title: 'Documentation'
-      regexp: "^.*docs[(\\w)]*:+.*$"
-      order: 3
-    - title: 'Other'
-      order: 999
+  - title: New Features
+    regexp: ^.*feat[(\w)]*:+.*$
+    order: 0
+  - title: Bug Fixes
+    regexp: ^.*fix[(\w)]*:+.*$
+    order: 1
+  - title: Performance Improvements
+    regexp: ^.*perf[(\w)]*:+.*$
+    order: 2
+  - title: Documentation
+    regexp: ^.*docs[(\w)]*:+.*$
+    order: 3
+  - title: Other
+    order: 999
 
 release:
   github:
@@ -99,7 +99,7 @@ release:
     name: sartor
   prerelease: auto
   draft: false
-  name_template: "{{.ProjectName}} v{{.Version}}"
+  name_template: '{{.ProjectName}} v{{.Version}}'
   header: |
     ## Sartor {{ .Tag }}
 
@@ -123,4 +123,4 @@ release:
     _Built with ❤️ by the Sartor team_
 
   extra_files:
-    - glob: ./config/crd/bases/*.yaml
+  - glob: ./config/crd/bases/*.yaml

@@ -7,7 +7,7 @@ on:
     branches: [main]
   schedule:
     # Run weekly on Monday at midnight
-    - cron: '0 0 * * 1'
+  - cron: 0 0 * * 1
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,101 +23,101 @@ jobs:
     name: Snyk Security Scan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+    - name: Checkout
+      uses: actions/checkout@v6
 
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-          cache-dependency-path: 'go.sum'
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
 
-      - name: Run Snyk to check for vulnerabilities
-        id: snyk
-        uses: snyk/actions/golang@master
-        continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --sarif-file-output=snyk.sarif --file=go.mod
+    - name: Run Snyk to check for vulnerabilities
+      id: snyk
+      uses: snyk/actions/golang@master
+      continue-on-error: true
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --sarif-file-output=snyk.sarif --file=go.mod
 
-      - name: Check if sarif file exists
-        id: check-sarif
-        run: |
-          if [ -f snyk.sarif ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
+    - name: Check if sarif file exists
+      id: check-sarif
+      run: |
+        if [ -f snyk.sarif ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
 
-      - name: Upload Snyk result to GitHub Code Scanning
-        uses: github/codeql-action/upload-sarif@v4
-        if: steps.check-sarif.outputs.exists == 'true'
-        with:
-          sarif_file: snyk.sarif
+    - name: Upload Snyk result to GitHub Code Scanning
+      uses: github/codeql-action/upload-sarif@v4
+      if: steps.check-sarif.outputs.exists == 'true'
+      with:
+        sarif_file: snyk.sarif
 
   codeql:
     name: CodeQL Analysis
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+    - name: Checkout
+      uses: actions/checkout@v6
 
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
-        with:
-          languages: go
-          queries: security-and-quality
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v4
+      with:
+        languages: go
+        queries: security-and-quality
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v4
+    - name: Autobuild
+      uses: github/codeql-action/autobuild@v4
 
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
-        with:
-          category: "/language:go"
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v4
+      with:
+        category: /language:go
 
   trivy:
     name: Trivy Container Scan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+    - name: Checkout
+      uses: actions/checkout@v6
 
-      - name: Build Controller image
-        run: |
-          docker build -t sartor-controller:scan -f Dockerfile .
+    - name: Build Controller image
+      run: |
+        docker build -t sartor-controller:scan -f Dockerfile .
 
-      - name: Run Trivy vulnerability scanner (Controller)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: 'sartor-controller:scan'
-          format: 'sarif'
-          output: 'trivy-controller-results.sarif'
-          severity: 'CRITICAL,HIGH'
+    - name: Run Trivy vulnerability scanner (Controller)
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: sartor-controller:scan
+        format: sarif
+        output: trivy-controller-results.sarif
+        severity: CRITICAL,HIGH
 
-      - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: 'trivy-controller-results.sarif'
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: trivy-controller-results.sarif
 
   govulncheck:
     name: Go Vulnerability Check
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+    - name: Checkout
+      uses: actions/checkout@v6
 
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-          cache-dependency-path: 'go.sum'
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
 
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+    - name: Install govulncheck
+      run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
-      - name: Run govulncheck
+    - name: Run govulncheck
         # Continue on error as some stdlib vulnerabilities may not have patches yet
-        continue-on-error: true
-        run: govulncheck ./...
+      continue-on-error: true
+      run: govulncheck ./...

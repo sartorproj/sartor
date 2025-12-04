@@ -70,7 +70,7 @@ var _ = Describe("Tailoring Controller", func() {
 	}
 
 	// Helper function to create a Tailoring
-	var createTestTailoring = func(name, atelierName string) *autoscalingv1alpha1.Tailoring {
+	var createTestTailoring = func(name string) *autoscalingv1alpha1.Tailoring {
 		tailoring := &autoscalingv1alpha1.Tailoring{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
@@ -134,7 +134,7 @@ var _ = Describe("Tailoring Controller", func() {
 
 		It("Should create successfully", func() {
 			By("Creating a new Tailoring")
-			createTestTailoring(tailoringName, atelierName)
+			createTestTailoring(tailoringName)
 
 			tailoringLookupKey := types.NamespacedName{
 				Name:      tailoringName,
@@ -153,7 +153,7 @@ var _ = Describe("Tailoring Controller", func() {
 
 		It("Should set TargetFound to false when workload doesn't exist", func() {
 			By("Creating a Tailoring targeting non-existent workload")
-			createTestTailoring(tailoringName, atelierName)
+			createTestTailoring(tailoringName)
 
 			tailoringLookupKey := types.NamespacedName{
 				Name:      tailoringName,
@@ -705,7 +705,7 @@ var _ = Describe("Tailoring Controller", func() {
 
 		It("Should delete successfully", func() {
 			By("Creating a Tailoring")
-			createTestTailoring(tailoringName, atelierName)
+			createTestTailoring(tailoringName)
 
 			tailoringLookupKey := types.NamespacedName{
 				Name:      tailoringName,

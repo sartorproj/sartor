@@ -97,6 +97,26 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+
+##@ Pre-commit
+
+.PHONY: pre-commit-install
+pre-commit-install: ## Install pre-commit hooks
+	@command -v pre-commit >/dev/null 2>&1 || { \
+		echo "Installing pre-commit..."; \
+		pip install pre-commit || brew install pre-commit; \
+	}
+	pre-commit install
+	pre-commit install --hook-type commit-msg
+	@echo "Pre-commit hooks installed successfully!"
+
+.PHONY: pre-commit-run
+pre-commit-run: ## Run pre-commit on all files
+	pre-commit run --all-files
+
+.PHONY: pre-commit-update
+pre-commit-update: ## Update pre-commit hooks to latest versions
+	pre-commit autoupdate
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e

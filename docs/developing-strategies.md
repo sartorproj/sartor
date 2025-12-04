@@ -43,7 +43,7 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    
+
     "k8s.io/apimachinery/pkg/api/resource"
     autoscalingv1alpha1 "github.com/sartorproj/sartor/api/v1alpha1"
     "github.com/sartorproj/sartor/internal/metrics/prometheus"
@@ -331,7 +331,7 @@ Example test:
 ```go
 func TestMyStrategy_Calculate(t *testing.T) {
     strategy := NewMyStrategy()
-    
+
     metrics := []prometheus.ContainerMetrics{
         {
             ContainerName: "app",
@@ -339,7 +339,7 @@ func TestMyStrategy_Calculate(t *testing.T) {
             P95Memory:     resource.MustParse("128Mi"),
         },
     }
-    
+
     config := StrategyConfig{
         Parameters: map[string]interface{}{
             "multiplier": 1.2,
@@ -348,7 +348,7 @@ func TestMyStrategy_Calculate(t *testing.T) {
             MinCPU: resource.MustParse("50m"),
         },
     }
-    
+
     recs, err := strategy.Calculate(context.Background(), metrics, nil, config)
     assert.NoError(t, err)
     assert.Len(t, recs, 1)

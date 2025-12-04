@@ -168,7 +168,7 @@ func TestCalculateRecommendation(t *testing.T) {
             expected: ResourceSpec{CPU: "120m"},
         },
     }
-    
+
     for _, tt := range tests {
         t.Run(tt.name, func(t *testing.T) {
             result := CalculateRecommendation(tt.input)
