@@ -55,14 +55,20 @@ jobs:
             The subject "{subject}" found in the pull request title
             "{title}" must not start with an uppercase character.
 
+      - name: Setup envtest
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+          setup-envtest use --bin-dir ./bin
+
       - name: Run tests
         run: |
+          export KUBEBUILDER_ASSETS="$(setup-envtest use -p path)"
           go test -v -race -coverprofile=coverage.out ./...
 
       - name: Run linter
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.1.6
           args: --timeout=5m
 
       - name: Check for breaking changes
