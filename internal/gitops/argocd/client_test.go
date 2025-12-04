@@ -120,7 +120,7 @@ func TestClient_ListApplications(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(mockResponse))
+		_, _ = w.Write([]byte(mockResponse))
 	}))
 	defer server.Close()
 
@@ -167,7 +167,7 @@ func TestClient_GetApplication(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(mockResponse))
+		_, _ = w.Write([]byte(mockResponse))
 	}))
 	defer server.Close()
 
@@ -203,7 +203,7 @@ func TestClient_Sync(t *testing.T) {
 				assert.Contains(t, r.URL.Path, "/sync")
 
 				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode(map[string]string{"status": "Syncing"})
+				_ = json.NewEncoder(w).Encode(map[string]string{"status": "Syncing"})
 			},
 			wantErr:    false,
 			wantStatus: "Syncing",
@@ -216,7 +216,7 @@ func TestClient_Sync(t *testing.T) {
 			},
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				var req SyncRequest
-				json.NewDecoder(r.Body).Decode(&req)
+				_ = json.NewDecoder(r.Body).Decode(&req)
 				assert.Equal(t, "abc123", req.Revision)
 				assert.True(t, req.Prune)
 
@@ -229,7 +229,7 @@ func TestClient_Sync(t *testing.T) {
 			request: SyncRequest{},
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("sync failed"))
+				_, _ = w.Write([]byte("sync failed"))
 			},
 			wantErr: true,
 		},

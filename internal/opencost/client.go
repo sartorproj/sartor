@@ -117,10 +117,10 @@ type AllocationEntry struct {
 	RAMEfficiency         float64 `json:"ramEfficiency"`
 
 	// Network
-	NetworkTransferBytes   float64 `json:"networkTransferBytes"`
-	NetworkReceiveBytes    float64 `json:"networkReceiveBytes"`
-	NetworkCost            float64 `json:"networkCost"`
-	NetworkCostAdjustment  float64 `json:"networkCostAdjustment"`
+	NetworkTransferBytes  float64 `json:"networkTransferBytes"`
+	NetworkReceiveBytes   float64 `json:"networkReceiveBytes"`
+	NetworkCost           float64 `json:"networkCost"`
+	NetworkCostAdjustment float64 `json:"networkCostAdjustment"`
 
 	// Persistent Volume
 	PVBytes          float64     `json:"pvBytes"`
@@ -212,7 +212,7 @@ func (c *Client) GetAllocations(ctx context.Context, req AllocationRequest) (*Al
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -248,7 +248,7 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to OpenCost: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("OpenCost returned status %d", resp.StatusCode)
@@ -339,8 +339,8 @@ type MetricsResponse struct {
 	NodeGPUCounts        []NodeGPU  `json:"nodeGpuCounts"`
 
 	// Storage Cost Metrics
-	PVHourlyCosts        []PVCost   `json:"pvHourlyCosts"`
-	LoadBalancerCosts    []LBCost   `json:"loadBalancerCosts"`
+	PVHourlyCosts     []PVCost `json:"pvHourlyCosts"`
+	LoadBalancerCosts []LBCost `json:"loadBalancerCosts"`
 
 	// Network Cost Metrics
 	NetworkZoneEgressCosts     []NetworkCost `json:"networkZoneEgressCosts"`
@@ -348,12 +348,12 @@ type MetricsResponse struct {
 	NetworkInternetEgressCosts []NetworkCost `json:"networkInternetEgressCosts"`
 
 	// Cluster Metrics
-	ClusterManagementCost float64       `json:"clusterManagementCost"`
-	ClusterInfo           *ClusterInfo  `json:"clusterInfo"`
+	ClusterManagementCost float64      `json:"clusterManagementCost"`
+	ClusterInfo           *ClusterInfo `json:"clusterInfo"`
 
 	// Kubernetes State Metrics
-	NodeCapacity        *NodeCapacity      `json:"nodeCapacity"`
-	NodeAllocatable     *NodeAllocatable   `json:"nodeAllocatable"`
+	NodeCapacity        *NodeCapacity        `json:"nodeCapacity"`
+	NodeAllocatable     *NodeAllocatable     `json:"nodeAllocatable"`
 	PodResourceRequests []PodResourceRequest `json:"podResourceRequests"`
 }
 
@@ -368,20 +368,20 @@ type ContainerAllocation struct {
 
 // NodeCapacity represents node capacity information.
 type NodeCapacity struct {
-	Node            string  `json:"node"`
-	CPUCores        float64 `json:"cpuCores"`
-	MemoryBytes     float64 `json:"memoryBytes"`
-	Pods            int     `json:"pods"`
-	EphemeralBytes  float64 `json:"ephemeralBytes"`
+	Node           string  `json:"node"`
+	CPUCores       float64 `json:"cpuCores"`
+	MemoryBytes    float64 `json:"memoryBytes"`
+	Pods           int     `json:"pods"`
+	EphemeralBytes float64 `json:"ephemeralBytes"`
 }
 
 // NodeAllocatable represents node allocatable resources.
 type NodeAllocatable struct {
-	Node            string  `json:"node"`
-	CPUCores        float64 `json:"cpuCores"`
-	MemoryBytes     float64 `json:"memoryBytes"`
-	Pods            int     `json:"pods"`
-	EphemeralBytes  float64 `json:"ephemeralBytes"`
+	Node           string  `json:"node"`
+	CPUCores       float64 `json:"cpuCores"`
+	MemoryBytes    float64 `json:"memoryBytes"`
+	Pods           int     `json:"pods"`
+	EphemeralBytes float64 `json:"ephemeralBytes"`
 }
 
 // PodResourceRequest represents pod resource requests.
@@ -396,11 +396,11 @@ type PodResourceRequest struct {
 
 // ClusterInfo represents cluster information from OpenCost.
 type ClusterInfo struct {
-	ID              string `json:"id"`
-	Provider        string `json:"provider"`
-	Version         string `json:"version"`
-	Region          string `json:"region"`
-	ClusterProfile  string `json:"clusterProfile"`
+	ID             string `json:"id"`
+	Provider       string `json:"provider"`
+	Version        string `json:"version"`
+	Region         string `json:"region"`
+	ClusterProfile string `json:"clusterProfile"`
 }
 
 // NodeCost represents node-level cost metrics.
@@ -450,31 +450,31 @@ type NetworkCost struct {
 // ResourceAnalytics provides analytics over OpenCost metrics.
 type ResourceAnalytics struct {
 	// Cluster-level metrics
-	TotalCPUCapacity        float64            `json:"totalCpuCapacity"`
-	TotalMemoryCapacity     float64            `json:"totalMemoryCapacity"`
-	TotalCPUAllocatable     float64            `json:"totalCpuAllocatable"`
-	TotalMemoryAllocatable  float64            `json:"totalMemoryAllocatable"`
-	
+	TotalCPUCapacity       float64 `json:"totalCpuCapacity"`
+	TotalMemoryCapacity    float64 `json:"totalMemoryCapacity"`
+	TotalCPUAllocatable    float64 `json:"totalCpuAllocatable"`
+	TotalMemoryAllocatable float64 `json:"totalMemoryAllocatable"`
+
 	// Allocation metrics
-	TotalCPUAllocated       float64            `json:"totalCpuAllocated"`
-	TotalMemoryAllocated    float64            `json:"totalMemoryAllocated"`
-	TotalGPUAllocated       float64            `json:"totalGpuAllocated"`
-	
+	TotalCPUAllocated    float64 `json:"totalCpuAllocated"`
+	TotalMemoryAllocated float64 `json:"totalMemoryAllocated"`
+	TotalGPUAllocated    float64 `json:"totalGpuAllocated"`
+
 	// Utilization percentages
-	CPUUtilizationPercent   float64            `json:"cpuUtilizationPercent"`
-	MemoryUtilizationPercent float64           `json:"memoryUtilizationPercent"`
-	
+	CPUUtilizationPercent    float64 `json:"cpuUtilizationPercent"`
+	MemoryUtilizationPercent float64 `json:"memoryUtilizationPercent"`
+
 	// Breakdown by namespace
-	CPUByNamespace          map[string]float64 `json:"cpuByNamespace"`
-	MemoryByNamespace       map[string]float64 `json:"memoryByNamespace"`
-	
+	CPUByNamespace    map[string]float64 `json:"cpuByNamespace"`
+	MemoryByNamespace map[string]float64 `json:"memoryByNamespace"`
+
 	// Breakdown by pod
-	CPUByPod                map[string]float64 `json:"cpuByPod"`
-	MemoryByPod             map[string]float64 `json:"memoryByPod"`
-	
+	CPUByPod    map[string]float64 `json:"cpuByPod"`
+	MemoryByPod map[string]float64 `json:"memoryByPod"`
+
 	// Top consumers
-	TopCPUConsumers         []ResourceConsumer `json:"topCpuConsumers"`
-	TopMemoryConsumers      []ResourceConsumer `json:"topMemoryConsumers"`
+	TopCPUConsumers    []ResourceConsumer `json:"topCpuConsumers"`
+	TopMemoryConsumers []ResourceConsumer `json:"topMemoryConsumers"`
 }
 
 // ResourceConsumer represents a resource consumer (pod/container).
@@ -504,7 +504,7 @@ func (c *Client) GetMetrics(ctx context.Context) (*MetricsResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -568,7 +568,7 @@ func (c *Client) GetResourceAnalytics(ctx context.Context) (*ResourceAnalytics, 
 
 	// Find top CPU consumers
 	analytics.TopCPUConsumers = getTopConsumers(metrics.ContainerCPUAllocations, analytics.TotalCPUAllocated, 10)
-	
+
 	// Find top memory consumers
 	analytics.TopMemoryConsumers = getTopConsumers(metrics.ContainerMemoryAllocations, analytics.TotalMemoryAllocated, 10)
 
@@ -577,22 +577,22 @@ func (c *Client) GetResourceAnalytics(ctx context.Context) (*ResourceAnalytics, 
 
 // NamespaceResourceBreakdown provides detailed resource breakdown for a namespace.
 type NamespaceResourceBreakdown struct {
-	Namespace        string                 `json:"namespace"`
-	TotalCPU         float64                `json:"totalCpu"`
-	TotalMemory      float64                `json:"totalMemory"`
-	TotalGPU         float64                `json:"totalGpu"`
-	CPUPercent       float64                `json:"cpuPercent"`
-	MemoryPercent    float64                `json:"memoryPercent"`
-	Containers       []ContainerBreakdown   `json:"containers"`
+	Namespace     string               `json:"namespace"`
+	TotalCPU      float64              `json:"totalCpu"`
+	TotalMemory   float64              `json:"totalMemory"`
+	TotalGPU      float64              `json:"totalGpu"`
+	CPUPercent    float64              `json:"cpuPercent"`
+	MemoryPercent float64              `json:"memoryPercent"`
+	Containers    []ContainerBreakdown `json:"containers"`
 }
 
 // ContainerBreakdown provides resource breakdown for a container.
 type ContainerBreakdown struct {
-	Container    string  `json:"container"`
-	Pod          string  `json:"pod"`
-	CPU          float64 `json:"cpu"`
-	Memory       float64 `json:"memory"`
-	GPU          float64 `json:"gpu"`
+	Container string  `json:"container"`
+	Pod       string  `json:"pod"`
+	CPU       float64 `json:"cpu"`
+	Memory    float64 `json:"memory"`
+	GPU       float64 `json:"gpu"`
 }
 
 // GetNamespaceBreakdown provides detailed resource breakdown for a specific namespace.
@@ -681,26 +681,26 @@ func (c *Client) GetNamespaceBreakdown(ctx context.Context, namespace string) (*
 // ClusterResourceSummary provides a high-level summary of cluster resources.
 type ClusterResourceSummary struct {
 	// Capacity
-	TotalNodes           int     `json:"totalNodes"`
-	TotalCPUCores        float64 `json:"totalCpuCores"`
-	TotalMemoryGB        float64 `json:"totalMemoryGb"`
-	
+	TotalNodes    int     `json:"totalNodes"`
+	TotalCPUCores float64 `json:"totalCpuCores"`
+	TotalMemoryGB float64 `json:"totalMemoryGb"`
+
 	// Allocation
-	AllocatedCPUCores    float64 `json:"allocatedCpuCores"`
-	AllocatedMemoryGB    float64 `json:"allocatedMemoryGb"`
-	
+	AllocatedCPUCores float64 `json:"allocatedCpuCores"`
+	AllocatedMemoryGB float64 `json:"allocatedMemoryGb"`
+
 	// Available
-	AvailableCPUCores    float64 `json:"availableCpuCores"`
-	AvailableMemoryGB    float64 `json:"availableMemoryGb"`
-	
+	AvailableCPUCores float64 `json:"availableCpuCores"`
+	AvailableMemoryGB float64 `json:"availableMemoryGb"`
+
 	// Utilization
-	CPUUtilization       float64 `json:"cpuUtilization"`
-	MemoryUtilization    float64 `json:"memoryUtilization"`
-	
+	CPUUtilization    float64 `json:"cpuUtilization"`
+	MemoryUtilization float64 `json:"memoryUtilization"`
+
 	// Counts
-	TotalPods            int     `json:"totalPods"`
-	TotalContainers      int     `json:"totalContainers"`
-	TotalNamespaces      int     `json:"totalNamespaces"`
+	TotalPods       int `json:"totalPods"`
+	TotalContainers int `json:"totalContainers"`
+	TotalNamespaces int `json:"totalNamespaces"`
 }
 
 // GetClusterResourceSummary provides a high-level summary of cluster resources.
@@ -760,24 +760,24 @@ func (c *Client) GetClusterResourceSummary(ctx context.Context) (*ClusterResourc
 // Based on metrics from https://opencost.io/docs/integrations/metrics
 type CostAnalytics struct {
 	// Hourly costs
-	TotalHourlyCost       float64            `json:"totalHourlyCost"`
-	CPUHourlyCost         float64            `json:"cpuHourlyCost"`
-	RAMHourlyCost         float64            `json:"ramHourlyCost"`
-	GPUHourlyCost         float64            `json:"gpuHourlyCost"`
-	StorageHourlyCost     float64            `json:"storageHourlyCost"`
-	NetworkHourlyCost     float64            `json:"networkHourlyCost"`
-	LoadBalancerHourlyCost float64           `json:"loadBalancerHourlyCost"`
-	ClusterManagementCost float64            `json:"clusterManagementCost"`
+	TotalHourlyCost        float64 `json:"totalHourlyCost"`
+	CPUHourlyCost          float64 `json:"cpuHourlyCost"`
+	RAMHourlyCost          float64 `json:"ramHourlyCost"`
+	GPUHourlyCost          float64 `json:"gpuHourlyCost"`
+	StorageHourlyCost      float64 `json:"storageHourlyCost"`
+	NetworkHourlyCost      float64 `json:"networkHourlyCost"`
+	LoadBalancerHourlyCost float64 `json:"loadBalancerHourlyCost"`
+	ClusterManagementCost  float64 `json:"clusterManagementCost"`
 
 	// Projected costs
-	DailyCost             float64            `json:"dailyCost"`
-	MonthlyCost           float64            `json:"monthlyCost"`
+	DailyCost   float64 `json:"dailyCost"`
+	MonthlyCost float64 `json:"monthlyCost"`
 
 	// Cost breakdown by namespace (estimated)
-	CostByNamespace       map[string]float64 `json:"costByNamespace"`
+	CostByNamespace map[string]float64 `json:"costByNamespace"`
 
 	// Node costs
-	NodeCosts             []NodeCostSummary  `json:"nodeCosts"`
+	NodeCosts []NodeCostSummary `json:"nodeCosts"`
 }
 
 // NodeCostSummary summarizes costs for a single node.
@@ -798,7 +798,7 @@ func (c *Client) GetCostAnalytics(ctx context.Context) (*CostAnalytics, error) {
 	}
 
 	analytics := &CostAnalytics{
-		CostByNamespace:      make(map[string]float64),
+		CostByNamespace:       make(map[string]float64),
 		ClusterManagementCost: metrics.ClusterManagementCost,
 	}
 
@@ -903,23 +903,7 @@ func (c *Client) GetCostAnalytics(ctx context.Context) (*CostAnalytics, error) {
 
 // parsePrometheusMetrics parses Prometheus text format metrics from OpenCost.
 func parsePrometheusMetrics(reader io.Reader) (*MetricsResponse, error) {
-	metrics := &MetricsResponse{
-		ContainerCPUAllocations:    []ContainerAllocation{},
-		ContainerMemoryAllocations: []ContainerAllocation{},
-		ContainerGPUAllocations:    []ContainerAllocation{},
-		PodPVCAllocations:          []PVCAllocation{},
-		NodeCPUHourlyCosts:         []NodeCost{},
-		NodeRAMHourlyCosts:         []NodeCost{},
-		NodeGPUHourlyCosts:         []NodeCost{},
-		NodeTotalHourlyCosts:       []NodeCost{},
-		NodeGPUCounts:              []NodeGPU{},
-		PVHourlyCosts:              []PVCost{},
-		LoadBalancerCosts:          []LBCost{},
-		NetworkZoneEgressCosts:     []NetworkCost{},
-		NetworkRegionEgressCosts:   []NetworkCost{},
-		NetworkInternetEgressCosts: []NetworkCost{},
-		PodResourceRequests:        []PodResourceRequest{},
-	}
+	metrics := newMetricsResponse()
 
 	// Regex patterns for parsing Prometheus metrics
 	metricLineRegex := regexp.MustCompile(`^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{([^}]*)\})?\s+(.+)$`)
@@ -950,169 +934,10 @@ func parsePrometheusMetrics(reader io.Reader) (*MetricsResponse, error) {
 		}
 
 		// Parse labels
-		labels := make(map[string]string)
-		labelMatches := labelRegex.FindAllStringSubmatch(labelsStr, -1)
-		for _, lm := range labelMatches {
-			labels[lm[1]] = lm[2]
-		}
+		labels := parseLabels(labelRegex, labelsStr)
 
-		// Process different metric types based on OpenCost documentation
-		switch metricName {
-		case "container_cpu_allocation":
-			metrics.ContainerCPUAllocations = append(metrics.ContainerCPUAllocations, ContainerAllocation{
-				Container: labels["container"],
-				Namespace: labels["namespace"],
-				Pod:       labels["pod"],
-				Node:      labels["node"],
-				Value:     value,
-			})
-
-		case "container_memory_allocation_bytes":
-			metrics.ContainerMemoryAllocations = append(metrics.ContainerMemoryAllocations, ContainerAllocation{
-				Container: labels["container"],
-				Namespace: labels["namespace"],
-				Pod:       labels["pod"],
-				Node:      labels["node"],
-				Value:     value,
-			})
-
-		case "container_gpu_allocation":
-			metrics.ContainerGPUAllocations = append(metrics.ContainerGPUAllocations, ContainerAllocation{
-				Container: labels["container"],
-				Namespace: labels["namespace"],
-				Pod:       labels["pod"],
-				Node:      labels["node"],
-				Value:     value,
-			})
-
-		case "pod_pvc_allocation":
-			metrics.PodPVCAllocations = append(metrics.PodPVCAllocations, PVCAllocation{
-				PersistentVolume: labels["persistentvolume"],
-				Namespace:        labels["namespace"],
-				Pod:              labels["pod"],
-				Bytes:            value,
-			})
-
-		case "node_cpu_hourly_cost":
-			metrics.NodeCPUHourlyCosts = append(metrics.NodeCPUHourlyCosts, NodeCost{
-				Node:       labels["node"],
-				Instance:   labels["instance"],
-				ProviderID: labels["provider_id"],
-				Value:      value,
-			})
-
-		case "node_ram_hourly_cost":
-			metrics.NodeRAMHourlyCosts = append(metrics.NodeRAMHourlyCosts, NodeCost{
-				Node:       labels["node"],
-				Instance:   labels["instance"],
-				ProviderID: labels["provider_id"],
-				Value:      value,
-			})
-
-		case "node_gpu_hourly_cost":
-			metrics.NodeGPUHourlyCosts = append(metrics.NodeGPUHourlyCosts, NodeCost{
-				Node:       labels["node"],
-				Instance:   labels["instance"],
-				ProviderID: labels["provider_id"],
-				Value:      value,
-			})
-
-		case "node_total_hourly_cost":
-			metrics.NodeTotalHourlyCosts = append(metrics.NodeTotalHourlyCosts, NodeCost{
-				Node:       labels["node"],
-				Instance:   labels["instance"],
-				ProviderID: labels["provider_id"],
-				Value:      value,
-			})
-
-		case "node_gpu_count":
-			metrics.NodeGPUCounts = append(metrics.NodeGPUCounts, NodeGPU{
-				Node:       labels["node"],
-				Instance:   labels["instance"],
-				ProviderID: labels["provider_id"],
-				Count:      int(value),
-			})
-
-		case "pv_hourly_cost":
-			metrics.PVHourlyCosts = append(metrics.PVHourlyCosts, PVCost{
-				PersistentVolume: labels["persistentvolume"],
-				HourlyCost:       value,
-			})
-
-		case "kubecost_load_balancer_cost":
-			metrics.LoadBalancerCosts = append(metrics.LoadBalancerCosts, LBCost{
-				Namespace:  labels["namespace"],
-				Service:    labels["service"],
-				HourlyCost: value,
-			})
-
-		case "kubecost_network_zone_egress_cost":
-			metrics.NetworkZoneEgressCosts = append(metrics.NetworkZoneEgressCosts, NetworkCost{
-				Namespace: labels["namespace"],
-				Service:   labels["service"],
-				CostPerGB: value,
-			})
-
-		case "kubecost_network_region_egress_cost":
-			metrics.NetworkRegionEgressCosts = append(metrics.NetworkRegionEgressCosts, NetworkCost{
-				Namespace: labels["namespace"],
-				Service:   labels["service"],
-				CostPerGB: value,
-			})
-
-		case "kubecost_network_internet_egress_cost":
-			metrics.NetworkInternetEgressCosts = append(metrics.NetworkInternetEgressCosts, NetworkCost{
-				Namespace: labels["namespace"],
-				Service:   labels["service"],
-				CostPerGB: value,
-			})
-
-		case "kubecost_cluster_management_cost":
-			metrics.ClusterManagementCost = value
-
-		case "kubecost_cluster_info":
-			metrics.ClusterInfo = &ClusterInfo{
-				ID:             labels["id"],
-				Provider:       labels["provider"],
-				Version:        labels["version"],
-				Region:         labels["region"],
-				ClusterProfile: labels["clusterprofile"],
-			}
-
-		case "kube_node_status_capacity_cpu_cores":
-			if metrics.NodeCapacity == nil {
-				metrics.NodeCapacity = &NodeCapacity{Node: labels["node"]}
-			}
-			metrics.NodeCapacity.CPUCores = value
-
-		case "kube_node_status_capacity_memory_bytes":
-			if metrics.NodeCapacity == nil {
-				metrics.NodeCapacity = &NodeCapacity{Node: labels["node"]}
-			}
-			metrics.NodeCapacity.MemoryBytes = value
-
-		case "kube_node_status_allocatable_cpu_cores":
-			if metrics.NodeAllocatable == nil {
-				metrics.NodeAllocatable = &NodeAllocatable{Node: labels["node"]}
-			}
-			metrics.NodeAllocatable.CPUCores = value
-
-		case "kube_node_status_allocatable_memory_bytes":
-			if metrics.NodeAllocatable == nil {
-				metrics.NodeAllocatable = &NodeAllocatable{Node: labels["node"]}
-			}
-			metrics.NodeAllocatable.MemoryBytes = value
-
-		case "kube_pod_container_resource_requests":
-			metrics.PodResourceRequests = append(metrics.PodResourceRequests, PodResourceRequest{
-				Container: labels["container"],
-				Namespace: labels["namespace"],
-				Pod:       labels["pod"],
-				Node:      labels["node"],
-				Resource:  labels["resource"],
-				Value:     value,
-			})
-		}
+		// Process the metric
+		processMetric(metrics, metricName, labels, value)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -1120,6 +945,179 @@ func parsePrometheusMetrics(reader io.Reader) (*MetricsResponse, error) {
 	}
 
 	return metrics, nil
+}
+
+// newMetricsResponse creates a new initialized MetricsResponse.
+func newMetricsResponse() *MetricsResponse {
+	return &MetricsResponse{
+		ContainerCPUAllocations:    []ContainerAllocation{},
+		ContainerMemoryAllocations: []ContainerAllocation{},
+		ContainerGPUAllocations:    []ContainerAllocation{},
+		PodPVCAllocations:          []PVCAllocation{},
+		NodeCPUHourlyCosts:         []NodeCost{},
+		NodeRAMHourlyCosts:         []NodeCost{},
+		NodeGPUHourlyCosts:         []NodeCost{},
+		NodeTotalHourlyCosts:       []NodeCost{},
+		NodeGPUCounts:              []NodeGPU{},
+		PVHourlyCosts:              []PVCost{},
+		LoadBalancerCosts:          []LBCost{},
+		NetworkZoneEgressCosts:     []NetworkCost{},
+		NetworkRegionEgressCosts:   []NetworkCost{},
+		NetworkInternetEgressCosts: []NetworkCost{},
+		PodResourceRequests:        []PodResourceRequest{},
+	}
+}
+
+// parseLabels parses Prometheus labels from a label string.
+func parseLabels(labelRegex *regexp.Regexp, labelsStr string) map[string]string {
+	labels := make(map[string]string)
+	labelMatches := labelRegex.FindAllStringSubmatch(labelsStr, -1)
+	for _, lm := range labelMatches {
+		labels[lm[1]] = lm[2]
+	}
+	return labels
+}
+
+// processMetric processes a single Prometheus metric and adds it to the response.
+func processMetric(metrics *MetricsResponse, metricName string, labels map[string]string, value float64) {
+	switch metricName {
+	case "container_cpu_allocation", "container_memory_allocation_bytes", "container_gpu_allocation":
+		processContainerAllocation(metrics, metricName, labels, value)
+	case "pod_pvc_allocation":
+		metrics.PodPVCAllocations = append(metrics.PodPVCAllocations, PVCAllocation{
+			PersistentVolume: labels["persistentvolume"],
+			Namespace:        labels["namespace"],
+			Pod:              labels["pod"],
+			Bytes:            value,
+		})
+	case "node_cpu_hourly_cost", "node_ram_hourly_cost", "node_gpu_hourly_cost", "node_total_hourly_cost":
+		processNodeCost(metrics, metricName, labels, value)
+	case "node_gpu_count":
+		metrics.NodeGPUCounts = append(metrics.NodeGPUCounts, NodeGPU{
+			Node:       labels["node"],
+			Instance:   labels["instance"],
+			ProviderID: labels["provider_id"],
+			Count:      int(value),
+		})
+	case "pv_hourly_cost":
+		metrics.PVHourlyCosts = append(metrics.PVHourlyCosts, PVCost{
+			PersistentVolume: labels["persistentvolume"],
+			HourlyCost:       value,
+		})
+	case "kubecost_load_balancer_cost":
+		metrics.LoadBalancerCosts = append(metrics.LoadBalancerCosts, LBCost{
+			Namespace:  labels["namespace"],
+			Service:    labels["service"],
+			HourlyCost: value,
+		})
+	case "kubecost_network_zone_egress_cost", "kubecost_network_region_egress_cost", "kubecost_network_internet_egress_cost":
+		processNetworkCost(metrics, metricName, labels, value)
+	case "kubecost_cluster_management_cost":
+		metrics.ClusterManagementCost = value
+	case "kubecost_cluster_info":
+		metrics.ClusterInfo = &ClusterInfo{
+			ID:             labels["id"],
+			Provider:       labels["provider"],
+			Version:        labels["version"],
+			Region:         labels["region"],
+			ClusterProfile: labels["clusterprofile"],
+		}
+	case "kube_node_status_capacity_cpu_cores", "kube_node_status_capacity_memory_bytes":
+		processNodeCapacity(metrics, metricName, labels, value)
+	case "kube_node_status_allocatable_cpu_cores", "kube_node_status_allocatable_memory_bytes":
+		processNodeAllocatable(metrics, metricName, labels, value)
+	case "kube_pod_container_resource_requests":
+		metrics.PodResourceRequests = append(metrics.PodResourceRequests, PodResourceRequest{
+			Container: labels["container"],
+			Namespace: labels["namespace"],
+			Pod:       labels["pod"],
+			Node:      labels["node"],
+			Resource:  labels["resource"],
+			Value:     value,
+		})
+	}
+}
+
+// processContainerAllocation handles container allocation metrics.
+func processContainerAllocation(metrics *MetricsResponse, metricName string, labels map[string]string, value float64) {
+	alloc := ContainerAllocation{
+		Container: labels["container"],
+		Namespace: labels["namespace"],
+		Pod:       labels["pod"],
+		Node:      labels["node"],
+		Value:     value,
+	}
+	switch metricName {
+	case "container_cpu_allocation":
+		metrics.ContainerCPUAllocations = append(metrics.ContainerCPUAllocations, alloc)
+	case "container_memory_allocation_bytes":
+		metrics.ContainerMemoryAllocations = append(metrics.ContainerMemoryAllocations, alloc)
+	case "container_gpu_allocation":
+		metrics.ContainerGPUAllocations = append(metrics.ContainerGPUAllocations, alloc)
+	}
+}
+
+// processNodeCost handles node cost metrics.
+func processNodeCost(metrics *MetricsResponse, metricName string, labels map[string]string, value float64) {
+	cost := NodeCost{
+		Node:       labels["node"],
+		Instance:   labels["instance"],
+		ProviderID: labels["provider_id"],
+		Value:      value,
+	}
+	switch metricName {
+	case "node_cpu_hourly_cost":
+		metrics.NodeCPUHourlyCosts = append(metrics.NodeCPUHourlyCosts, cost)
+	case "node_ram_hourly_cost":
+		metrics.NodeRAMHourlyCosts = append(metrics.NodeRAMHourlyCosts, cost)
+	case "node_gpu_hourly_cost":
+		metrics.NodeGPUHourlyCosts = append(metrics.NodeGPUHourlyCosts, cost)
+	case "node_total_hourly_cost":
+		metrics.NodeTotalHourlyCosts = append(metrics.NodeTotalHourlyCosts, cost)
+	}
+}
+
+// processNetworkCost handles network egress cost metrics.
+func processNetworkCost(metrics *MetricsResponse, metricName string, labels map[string]string, value float64) {
+	cost := NetworkCost{
+		Namespace: labels["namespace"],
+		Service:   labels["service"],
+		CostPerGB: value,
+	}
+	switch metricName {
+	case "kubecost_network_zone_egress_cost":
+		metrics.NetworkZoneEgressCosts = append(metrics.NetworkZoneEgressCosts, cost)
+	case "kubecost_network_region_egress_cost":
+		metrics.NetworkRegionEgressCosts = append(metrics.NetworkRegionEgressCosts, cost)
+	case "kubecost_network_internet_egress_cost":
+		metrics.NetworkInternetEgressCosts = append(metrics.NetworkInternetEgressCosts, cost)
+	}
+}
+
+// processNodeCapacity handles node capacity metrics.
+func processNodeCapacity(metrics *MetricsResponse, metricName string, labels map[string]string, value float64) {
+	if metrics.NodeCapacity == nil {
+		metrics.NodeCapacity = &NodeCapacity{Node: labels["node"]}
+	}
+	switch metricName {
+	case "kube_node_status_capacity_cpu_cores":
+		metrics.NodeCapacity.CPUCores = value
+	case "kube_node_status_capacity_memory_bytes":
+		metrics.NodeCapacity.MemoryBytes = value
+	}
+}
+
+// processNodeAllocatable handles node allocatable metrics.
+func processNodeAllocatable(metrics *MetricsResponse, metricName string, labels map[string]string, value float64) {
+	if metrics.NodeAllocatable == nil {
+		metrics.NodeAllocatable = &NodeAllocatable{Node: labels["node"]}
+	}
+	switch metricName {
+	case "kube_node_status_allocatable_cpu_cores":
+		metrics.NodeAllocatable.CPUCores = value
+	case "kube_node_status_allocatable_memory_bytes":
+		metrics.NodeAllocatable.MemoryBytes = value
+	}
 }
 
 // getTopConsumers returns the top N resource consumers sorted by value.

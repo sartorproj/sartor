@@ -99,12 +99,12 @@ func main() {
 	// Health endpoints
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
+		_, _ = fmt.Fprint(w, "ok")
 	})
 
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
+		_, _ = fmt.Fprint(w, "ok")
 	})
 
 	// Register API routes
@@ -114,7 +114,7 @@ func main() {
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotImplemented)
-		fmt.Fprint(w, `{"error": "not implemented", "message": "MCP server will be available in Phase 4"}`)
+		_, _ = fmt.Fprint(w, `{"error": "not implemented", "message": "MCP server will be available in Phase 4"}`)
 	})
 
 	// Apply middleware

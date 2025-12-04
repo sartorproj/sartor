@@ -53,7 +53,7 @@ func (w *HelmWriter) UpdateValues(content []byte, updates []ResourceUpdate, valu
 	pathParts := strings.Split(valuePath, ".")
 
 	// Navigate to the parent of the resources section
-	var parentNode *yaml.Node = doc
+	parentNode := doc
 	for i := 0; i < len(pathParts)-1; i++ {
 		parentNode = findKey(parentNode, pathParts[i])
 		if parentNode == nil {

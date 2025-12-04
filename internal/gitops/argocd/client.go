@@ -46,6 +46,9 @@ const (
 	ApplicationGroup   = "argoproj.io"
 	ApplicationVersion = "v1alpha1"
 	ApplicationKind    = "Application"
+
+	// refreshTypeHard is the hard refresh type for ArgoCD.
+	refreshTypeHard = "hard"
 )
 
 // Config holds configuration for the ArgoCD client.
@@ -225,7 +228,7 @@ func (c *Client) ListApplications(ctx context.Context) ([]Application, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to list applications: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -373,7 +376,7 @@ func (c *Client) syncViaAPI(ctx context.Context, appName string, req SyncRequest
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync application: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -408,7 +411,7 @@ func (c *Client) syncViaCluster(ctx context.Context, appName, appNamespace strin
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
-	annotations["argocd.argoproj.io/refresh"] = "hard"
+	annotations["argocd.argoproj.io/refresh"] = refreshTypeHard
 	app.SetAnnotations(annotations)
 
 	if err := c.k8sClient.Update(ctx, app); err != nil {
@@ -434,7 +437,7 @@ func (c *Client) Refresh(ctx context.Context, appName, appNamespace string, hard
 func (c *Client) refreshViaAPI(ctx context.Context, appName string, hard bool) (*RefreshResult, error) {
 	refreshType := "normal"
 	if hard {
-		refreshType = "hard"
+		refreshType = refreshTypeHard
 	}
 
 	url := fmt.Sprintf("%s/api/v1/applications/%s?refresh=%s", strings.TrimSuffix(c.config.ServerURL, "/"), appName, refreshType)
@@ -450,7 +453,7 @@ func (c *Client) refreshViaAPI(ctx context.Context, appName string, hard bool) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to refresh application: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -488,7 +491,7 @@ func (c *Client) refreshViaCluster(ctx context.Context, appName, appNamespace st
 
 	refreshType := "normal"
 	if hard {
-		refreshType = "hard"
+		refreshType = refreshTypeHard
 	}
 	annotations["argocd.argoproj.io/refresh"] = refreshType
 	app.SetAnnotations(annotations)
@@ -527,7 +530,7 @@ func (c *Client) getApplicationViaAPI(ctx context.Context, appName string) (*App
 	if err != nil {
 		return nil, fmt.Errorf("failed to get application: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

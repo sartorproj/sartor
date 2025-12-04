@@ -30,6 +30,17 @@ import (
 	"github.com/sartorproj/sartor/internal/recommender/preprocessing"
 )
 
+const (
+	// methodFFT is the FFT prediction method.
+	methodFFT = "fft"
+	// methodMaxValue is the max value prediction method.
+	methodMaxValue = "maxValue"
+	// resourceTypeCPU is the CPU resource type.
+	resourceTypeCPU = "cpu"
+	// resourceTypeMemory is the memory resource type.
+	resourceTypeMemory = "memory"
+)
+
 // DSPStrategy implements DSP-based time series prediction for recommendations.
 // Inspired by Crane's DSP algorithm: https://gocrane.io/docs/core-concept/timeseries-forecasting-by-dsp/
 type DSPStrategy struct {
@@ -78,9 +89,9 @@ func (s *DSPStrategy) Calculate(
 
 // calculateForContainer computes recommendation for a single container using DSP.
 func (s *DSPStrategy) calculateForContainer(
-	ctx context.Context,
+	_ context.Context,
 	metrics prometheus.ContainerMetrics,
-	current autoscalingv1alpha1.ResourceRequirements,
+	_ autoscalingv1alpha1.ResourceRequirements,
 	config StrategyConfig,
 ) (Recommendation, error) {
 	rec := Recommendation{
@@ -116,7 +127,7 @@ func (s *DSPStrategy) calculateForContainer(
 
 	// Predict CPU using DSP
 	if len(cpuSeries) > 0 {
-		cpuPrediction, confidence, err := s.predictResource(cpuSeries, dspParams, "cpu", config)
+		cpuPrediction, confidence, err := s.predictResource(cpuSeries, dspParams, resourceTypeCPU, config)
 		if err == nil && cpuPrediction != nil {
 			// Use predicted values for requests and limits
 			rec.Requests.CPU = cpuPrediction.Requests
@@ -136,7 +147,7 @@ func (s *DSPStrategy) calculateForContainer(
 
 	// Predict Memory using DSP
 	if len(memSeries) > 0 {
-		memPrediction, confidence, err := s.predictResource(memSeries, dspParams, "memory", config)
+		memPrediction, confidence, err := s.predictResource(memSeries, dspParams, resourceTypeMemory, config)
 		if err == nil && memPrediction != nil {
 			rec.Requests.Memory = memPrediction.Requests
 			rec.Limits.Memory = memPrediction.Limits
@@ -168,6 +179,7 @@ func (s *DSPStrategy) calculateForContainer(
 
 // extractTimeSeries extracts time series from metrics.
 // In practice, this would fetch historical data from Prometheus.
+// nolint:unparam // Error return is for future expansion when fetching real historical data.
 func (s *DSPStrategy) extractTimeSeries(metrics prometheus.ContainerMetrics) ([]preprocessing.TimeSeries, []preprocessing.TimeSeries, error) {
 	// For now, create synthetic time series from P95/P99 values
 	// In production, fetch actual historical time series from Prometheus
@@ -228,7 +240,7 @@ func (s *DSPStrategy) predictResource(
 	params.Period = period
 
 	// Choose prediction method based on config
-	method := "fft"
+	method := methodFFT
 	if config.Parameters != nil {
 		if m, ok := config.Parameters["method"].(string); ok {
 			method = m
@@ -238,10 +250,10 @@ func (s *DSPStrategy) predictResource(
 	var predicted []preprocessing.TimeSeries
 
 	switch method {
-	case "maxValue":
+	case methodMaxValue:
 		marginFraction := params.MarginFraction
 		predicted = s.dspProcessor.PredictMaxValue(series, period, marginFraction)
-	case "fft":
+	case methodFFT:
 		fallthrough
 	default:
 		predicted = s.dspProcessor.PredictFFT(series, params)
@@ -269,7 +281,7 @@ func (s *DSPStrategy) predictResource(
 
 	// Convert to resource.Quantity
 	var requests, limits *resource.Quantity
-	if resourceType == "cpu" {
+	if resourceType == resourceTypeCPU {
 		requests = resource.NewMilliQuantity(int64(p95Value*1000), resource.DecimalSI)
 		limits = resource.NewMilliQuantity(int64(maxValue*1000), resource.DecimalSI)
 	} else {
@@ -403,8 +415,8 @@ func (s *DSPStrategy) ValidateFitProfileParameters(parameters map[string]interfa
 
 	// Validate method
 	if method, ok := parameters["method"].(string); ok {
-		if method != "fft" && method != "maxValue" {
-			return fmt.Errorf("method must be 'fft' or 'maxValue', got %s", method)
+		if method != methodFFT && method != methodMaxValue {
+			return fmt.Errorf("method must be '%s' or '%s', got %s", methodFFT, methodMaxValue, method)
 		}
 	}
 
@@ -467,7 +479,7 @@ func (s *DSPStrategy) GetDefaultFitProfileSpec() FitProfileSpec {
 	}
 
 	var paramsSchema map[string]interface{}
-	json.Unmarshal([]byte(`{
+	_ = json.Unmarshal([]byte(`{
 		"type": "object",
 		"properties": {
 			"method": {
@@ -536,14 +548,7 @@ func (s *DSPStrategy) GetChartLines(
 		containerName := rec.ContainerName
 
 		// Find metrics for this container
-		var containerMetrics *prometheus.ContainerMetrics
-		for i := range metrics {
-			if metrics[i].ContainerName == containerName {
-				containerMetrics = &metrics[i]
-				break
-			}
-		}
-
+		containerMetrics := findContainerMetrics(metrics, containerName)
 		if containerMetrics == nil {
 			continue
 		}
@@ -557,102 +562,121 @@ func (s *DSPStrategy) GetChartLines(
 		// Get DSP parameters
 		params := s.getDSPParameters(config)
 
-		// Predict CPU
-		if len(cpuSeries) > 0 {
-			cpuPred, _, err := s.predictResource(cpuSeries, params, "cpu", config)
-			if err == nil && cpuPred != nil {
-				// Add predicted requests and limits
-				if lines["cpu_predicted_requests"] == nil {
-					lines["cpu_predicted_requests"] = make(map[int64]float64)
-				}
-				if lines["cpu_predicted_limits"] == nil {
-					lines["cpu_predicted_limits"] = make(map[int64]float64)
-				}
+		// Process CPU chart lines
+		s.addResourceChartLines(lines, cpuSeries, params, resourceTypeCPU, config)
 
-				// Use latest timestamp from metrics
-				if len(cpuSeries) > 0 {
-					latestTs := cpuSeries[len(cpuSeries)-1].Timestamp
-					if cpuPred.Requests != nil {
-						lines["cpu_predicted_requests"][latestTs] = float64(cpuPred.Requests.MilliValue()) / 1000.0
-					}
-					if cpuPred.Limits != nil {
-						lines["cpu_predicted_limits"][latestTs] = float64(cpuPred.Limits.MilliValue()) / 1000.0
-					}
-				}
-
-				// Add min/max from time series
-				if len(cpuSeries) > 0 {
-					minVal := cpuSeries[0].Value
-					maxVal := cpuSeries[0].Value
-					for _, point := range cpuSeries {
-						if point.Value < minVal {
-							minVal = point.Value
-						}
-						if point.Value > maxVal {
-							maxVal = point.Value
-						}
-					}
-					if lines["cpu_min"] == nil {
-						lines["cpu_min"] = make(map[int64]float64)
-					}
-					if lines["cpu_max"] == nil {
-						lines["cpu_max"] = make(map[int64]float64)
-					}
-					latestTs := cpuSeries[len(cpuSeries)-1].Timestamp
-					lines["cpu_min"][latestTs] = minVal
-					lines["cpu_max"][latestTs] = maxVal
-				}
-			}
-		}
-
-		// Predict Memory
-		if len(memSeries) > 0 {
-			memPred, _, err := s.predictResource(memSeries, params, "memory", config)
-			if err == nil && memPred != nil {
-				// Add predicted requests and limits
-				if lines["memory_predicted_requests"] == nil {
-					lines["memory_predicted_requests"] = make(map[int64]float64)
-				}
-				if lines["memory_predicted_limits"] == nil {
-					lines["memory_predicted_limits"] = make(map[int64]float64)
-				}
-
-				// Use latest timestamp from metrics
-				if len(memSeries) > 0 {
-					latestTs := memSeries[len(memSeries)-1].Timestamp
-					if memPred.Requests != nil {
-						lines["memory_predicted_requests"][latestTs] = float64(memPred.Requests.Value())
-					}
-					if memPred.Limits != nil {
-						lines["memory_predicted_limits"][latestTs] = float64(memPred.Limits.Value())
-					}
-				}
-
-				// Add min/max from time series
-				if len(memSeries) > 0 {
-					minVal := memSeries[0].Value
-					maxVal := memSeries[0].Value
-					for _, point := range memSeries {
-						if point.Value < minVal {
-							minVal = point.Value
-						}
-						if point.Value > maxVal {
-							maxVal = point.Value
-						}
-					}
-					if lines["memory_min"] == nil {
-						lines["memory_min"] = make(map[int64]float64)
-					}
-					if lines["memory_max"] == nil {
-						lines["memory_max"] = make(map[int64]float64)
-					}
-					latestTs := memSeries[len(memSeries)-1].Timestamp
-					lines["memory_min"][latestTs] = minVal
-					lines["memory_max"][latestTs] = maxVal
-				}
-			}
-		}
+		// Process Memory chart lines
+		s.addResourceChartLines(lines, memSeries, params, resourceTypeMemory, config)
 	}
 
 	return lines, nil
+}
+
+// findContainerMetrics finds metrics for a specific container.
+func findContainerMetrics(metrics []prometheus.ContainerMetrics, containerName string) *prometheus.ContainerMetrics {
+	for i := range metrics {
+		if metrics[i].ContainerName == containerName {
+			return &metrics[i]
+		}
+	}
+	return nil
+}
+
+// addResourceChartLines adds chart lines for a specific resource type (cpu or memory).
+func (s *DSPStrategy) addResourceChartLines(
+	lines map[string]map[int64]float64,
+	series []preprocessing.TimeSeries,
+	params dsp.FFTConfig,
+	resourceType string,
+	config StrategyConfig,
+) {
+	if len(series) == 0 {
+		return
+	}
+
+	pred, _, err := s.predictResource(series, params, resourceType, config)
+	if err != nil || pred == nil {
+		return
+	}
+
+	latestTs := series[len(series)-1].Timestamp
+
+	// Add predicted requests and limits
+	s.addPredictionLines(lines, pred, resourceType, latestTs)
+
+	// Add min/max from time series
+	s.addMinMaxLines(lines, series, resourceType, latestTs)
+}
+
+// addPredictionLines adds predicted request/limit lines for a resource type.
+func (s *DSPStrategy) addPredictionLines(
+	lines map[string]map[int64]float64,
+	pred *ResourcePrediction,
+	resourceType string,
+	timestamp int64,
+) {
+	reqKey := resourceType + "_predicted_requests"
+	limKey := resourceType + "_predicted_limits"
+
+	if lines[reqKey] == nil {
+		lines[reqKey] = make(map[int64]float64)
+	}
+	if lines[limKey] == nil {
+		lines[limKey] = make(map[int64]float64)
+	}
+
+	if pred.Requests != nil {
+		if resourceType == resourceTypeCPU {
+			lines[reqKey][timestamp] = float64(pred.Requests.MilliValue()) / 1000.0
+		} else {
+			lines[reqKey][timestamp] = float64(pred.Requests.Value())
+		}
+	}
+	if pred.Limits != nil {
+		if resourceType == resourceTypeCPU {
+			lines[limKey][timestamp] = float64(pred.Limits.MilliValue()) / 1000.0
+		} else {
+			lines[limKey][timestamp] = float64(pred.Limits.Value())
+		}
+	}
+}
+
+// addMinMaxLines adds min/max lines for a resource type.
+func (s *DSPStrategy) addMinMaxLines(
+	lines map[string]map[int64]float64,
+	series []preprocessing.TimeSeries,
+	resourceType string,
+	timestamp int64,
+) {
+	minKey := resourceType + "_min"
+	maxKey := resourceType + "_max"
+
+	if lines[minKey] == nil {
+		lines[minKey] = make(map[int64]float64)
+	}
+	if lines[maxKey] == nil {
+		lines[maxKey] = make(map[int64]float64)
+	}
+
+	minVal, maxVal := getMinMax(series)
+	lines[minKey][timestamp] = minVal
+	lines[maxKey][timestamp] = maxVal
+}
+
+// getMinMax returns the min and max values from a time series.
+func getMinMax(series []preprocessing.TimeSeries) (min, max float64) {
+	if len(series) == 0 {
+		return 0, 0
+	}
+	min = series[0].Value
+	max = series[0].Value
+	for _, point := range series {
+		if point.Value < min {
+			min = point.Value
+		}
+		if point.Value > max {
+			max = point.Value
+		}
+	}
+	return min, max
 }

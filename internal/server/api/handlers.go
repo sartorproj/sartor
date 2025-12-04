@@ -127,7 +127,7 @@ type DashboardStats struct {
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 // writeError writes an error response.
@@ -546,9 +546,8 @@ func (h *Handler) SyncArgoCDApp(w http.ResponseWriter, r *http.Request) {
 	// Parse request body
 	var syncReq ArgoCDSyncRequest
 	if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&syncReq); err != nil {
-			// Ignore decode errors, use defaults
-		}
+		// Ignore decode errors, use defaults
+		_ = json.NewDecoder(r.Body).Decode(&syncReq)
 	}
 
 	argoCDClient, err := h.createArgoCDClient(ctx, atelier)
@@ -892,26 +891,26 @@ type OpenCostAllocationRequest struct {
 
 // OpenCostAllocationSummary is a simplified view of allocation data for the UI.
 type OpenCostAllocationSummary struct {
-	Name              string  `json:"name"`
-	Cluster           string  `json:"cluster,omitempty"`
-	Namespace         string  `json:"namespace,omitempty"`
-	Controller        string  `json:"controller,omitempty"`
-	ControllerKind    string  `json:"controllerKind,omitempty"`
-	Pod               string  `json:"pod,omitempty"`
-	Container         string  `json:"container,omitempty"`
-	CPUCores          float64 `json:"cpuCores"`
-	CPUCost           float64 `json:"cpuCost"`
-	CPUEfficiency     float64 `json:"cpuEfficiency"`
-	RAMBytes          float64 `json:"ramBytes"`
-	RAMCost           float64 `json:"ramCost"`
-	RAMEfficiency     float64 `json:"ramEfficiency"`
-	GPUCost           float64 `json:"gpuCost"`
-	PVCost            float64 `json:"pvCost"`
-	NetworkCost       float64 `json:"networkCost"`
-	LoadBalancerCost  float64 `json:"loadBalancerCost"`
-	SharedCost        float64 `json:"sharedCost"`
-	TotalCost         float64 `json:"totalCost"`
-	TotalEfficiency   float64 `json:"totalEfficiency"`
+	Name             string  `json:"name"`
+	Cluster          string  `json:"cluster,omitempty"`
+	Namespace        string  `json:"namespace,omitempty"`
+	Controller       string  `json:"controller,omitempty"`
+	ControllerKind   string  `json:"controllerKind,omitempty"`
+	Pod              string  `json:"pod,omitempty"`
+	Container        string  `json:"container,omitempty"`
+	CPUCores         float64 `json:"cpuCores"`
+	CPUCost          float64 `json:"cpuCost"`
+	CPUEfficiency    float64 `json:"cpuEfficiency"`
+	RAMBytes         float64 `json:"ramBytes"`
+	RAMCost          float64 `json:"ramCost"`
+	RAMEfficiency    float64 `json:"ramEfficiency"`
+	GPUCost          float64 `json:"gpuCost"`
+	PVCost           float64 `json:"pvCost"`
+	NetworkCost      float64 `json:"networkCost"`
+	LoadBalancerCost float64 `json:"loadBalancerCost"`
+	SharedCost       float64 `json:"sharedCost"`
+	TotalCost        float64 `json:"totalCost"`
+	TotalEfficiency  float64 `json:"totalEfficiency"`
 }
 
 // OpenCostSummary is the overall cost summary.

@@ -24,6 +24,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+const (
+	// notAvailable is the placeholder for unavailable values.
+	notAvailable = "N/A"
+)
+
 // ResourceUpdate contains the updated resource values for a container.
 type ResourceUpdate struct {
 	ContainerName string
@@ -312,11 +317,10 @@ func GeneratePRDescriptionDetailed(updates []ResourceUpdate, opts PRDescriptionO
 		buf.WriteString(fmt.Sprintf("#### Container: `%s`\n\n", update.ContainerName))
 
 		// Get current resources if available
-		var currentReq, currentLim *ResourceValues
+		var currentRes *ResourceValues
 		if opts.CurrentResources != nil {
 			if current, ok := opts.CurrentResources[update.ContainerName]; ok {
-				currentReq = current
-				currentLim = current
+				currentRes = current
 			}
 		}
 
@@ -326,111 +330,16 @@ func GeneratePRDescriptionDetailed(updates []ResourceUpdate, opts PRDescriptionO
 			metrics = opts.Metrics[update.ContainerName]
 		}
 
-		// Requests table
-		if update.Requests != nil && (update.Requests.CPU != nil || update.Requests.Memory != nil) {
-			buf.WriteString("**Requests:**\n\n")
-			buf.WriteString("| Resource | Current | Recommended | Change |\n")
-			buf.WriteString("|----------|---------|-------------|--------|\n")
-
-			if update.Requests.CPU != nil {
-				currentCPU := "N/A"
-				change := ""
-				if currentReq != nil && currentReq.CPU != nil {
-					currentCPU = currentReq.CPU.String()
-					change = calculateChangePercent(currentReq.CPU, update.Requests.CPU)
-				}
-				buf.WriteString(fmt.Sprintf("| CPU | %s | %s | %s |\n", currentCPU, update.Requests.CPU.String(), change))
-			}
-
-			if update.Requests.Memory != nil {
-				currentMem := "N/A"
-				change := ""
-				if currentReq != nil && currentReq.Memory != nil {
-					currentMem = currentReq.Memory.String()
-					change = calculateChangePercent(currentReq.Memory, update.Requests.Memory)
-				}
-				buf.WriteString(fmt.Sprintf("| Memory | %s | %s | %s |\n", currentMem, update.Requests.Memory.String(), change))
-			}
-			buf.WriteString("\n")
-		}
-
-		// Limits table
-		if update.Limits != nil && (update.Limits.CPU != nil || update.Limits.Memory != nil) {
-			buf.WriteString("**Limits:**\n\n")
-			buf.WriteString("| Resource | Current | Recommended | Change |\n")
-			buf.WriteString("|----------|---------|-------------|--------|\n")
-
-			if update.Limits.CPU != nil {
-				currentCPU := "N/A"
-				change := ""
-				if currentLim != nil && currentLim.CPU != nil {
-					currentCPU = currentLim.CPU.String()
-					change = calculateChangePercent(currentLim.CPU, update.Limits.CPU)
-				}
-				buf.WriteString(fmt.Sprintf("| CPU | %s | %s | %s |\n", currentCPU, update.Limits.CPU.String(), change))
-			}
-
-			if update.Limits.Memory != nil {
-				currentMem := "N/A"
-				change := ""
-				if currentLim != nil && currentLim.Memory != nil {
-					currentMem = currentLim.Memory.String()
-					change = calculateChangePercent(currentLim.Memory, update.Limits.Memory)
-				}
-				buf.WriteString(fmt.Sprintf("| Memory | %s | %s | %s |\n", currentMem, update.Limits.Memory.String(), change))
-			}
-			buf.WriteString("\n")
-		}
+		// Write resource tables
+		writeResourceTable(&buf, "Requests", update.Requests, currentRes)
+		writeResourceTable(&buf, "Limits", update.Limits, currentRes)
 
 		// Metrics explanation
-		if metrics != nil {
-			buf.WriteString("<details>\n<summary>📊 Metrics Analysis</summary>\n\n")
-			buf.WriteString("Observed usage during analysis window:\n\n")
-			buf.WriteString("| Metric | Value |\n")
-			buf.WriteString("|--------|-------|\n")
-			if metrics.P95CPU != "" {
-				buf.WriteString(fmt.Sprintf("| P95 CPU | %s |\n", metrics.P95CPU))
-			}
-			if metrics.P99CPU != "" {
-				buf.WriteString(fmt.Sprintf("| P99 CPU | %s |\n", metrics.P99CPU))
-			}
-			if metrics.P95Memory != "" {
-				buf.WriteString(fmt.Sprintf("| P95 Memory | %s |\n", metrics.P95Memory))
-			}
-			if metrics.P99Memory != "" {
-				buf.WriteString(fmt.Sprintf("| P99 Memory | %s |\n", metrics.P99Memory))
-			}
-			buf.WriteString("\n")
-
-			// Explanation
-			buf.WriteString("**Calculation method:**\n")
-			buf.WriteString("- Requests are based on P95 usage + buffer (varies by intent)\n")
-			buf.WriteString("- Limits are based on P99 usage + buffer (varies by intent)\n\n")
-			buf.WriteString("</details>\n\n")
-		}
+		writeMetricsAnalysis(&buf, metrics)
 	}
 
 	// Intent explanation
-	if opts.Intent != "" {
-		buf.WriteString("### Intent Profile\n\n")
-		switch opts.Intent {
-		case "Eco":
-			buf.WriteString("**Eco** - Aggressive optimization for cost savings\n")
-			buf.WriteString("- Requests: P95 + 10% buffer\n")
-			buf.WriteString("- Limits: P99 + 20% buffer\n")
-			buf.WriteString("- Max change per PR: Unlimited\n\n")
-		case "Balanced":
-			buf.WriteString("**Balanced** - Balance between savings and headroom\n")
-			buf.WriteString("- Requests: P95 + 20% buffer\n")
-			buf.WriteString("- Limits: P99 + 30% buffer\n")
-			buf.WriteString("- Max change per PR: 50%\n\n")
-		case "Critical":
-			buf.WriteString("**Critical** - Conservative with extra headroom\n")
-			buf.WriteString("- Requests: P95 + 40% buffer\n")
-			buf.WriteString("- Limits: P99 + 50% buffer\n")
-			buf.WriteString("- Max change per PR: 30%\n\n")
-		}
-	}
+	writeIntentProfile(&buf, opts.Intent)
 
 	// How to reject
 	buf.WriteString("### Actions\n\n")
@@ -454,7 +363,7 @@ func calculateChangePercent(current, recommended *resource.Quantity) string {
 	recommendedVal := recommended.AsApproximateFloat64()
 
 	if currentVal == 0 {
-		return "N/A"
+		return notAvailable
 	}
 
 	change := ((recommendedVal - currentVal) / currentVal) * 100
@@ -463,4 +372,92 @@ func calculateChangePercent(current, recommended *resource.Quantity) string {
 		return fmt.Sprintf("+%.1f%%", change)
 	}
 	return fmt.Sprintf("%.1f%%", change)
+}
+
+// writeResourceTable writes a resource table (Requests or Limits) to the buffer.
+func writeResourceTable(buf *bytes.Buffer, label string, update *ResourceValues, current *ResourceValues) {
+	if update == nil || (update.CPU == nil && update.Memory == nil) {
+		return
+	}
+
+	fmt.Fprintf(buf, "**%s:**\n\n", label)
+	buf.WriteString("| Resource | Current | Recommended | Change |\n")
+	buf.WriteString("|----------|---------|-------------|--------|\n")
+
+	if update.CPU != nil {
+		currentCPU := notAvailable
+		change := ""
+		if current != nil && current.CPU != nil {
+			currentCPU = current.CPU.String()
+			change = calculateChangePercent(current.CPU, update.CPU)
+		}
+		fmt.Fprintf(buf, "| CPU | %s | %s | %s |\n", currentCPU, update.CPU.String(), change)
+	}
+
+	if update.Memory != nil {
+		currentMem := notAvailable
+		change := ""
+		if current != nil && current.Memory != nil {
+			currentMem = current.Memory.String()
+			change = calculateChangePercent(current.Memory, update.Memory)
+		}
+		fmt.Fprintf(buf, "| Memory | %s | %s | %s |\n", currentMem, update.Memory.String(), change)
+	}
+	buf.WriteString("\n")
+}
+
+// writeMetricsAnalysis writes the metrics analysis section to the buffer.
+func writeMetricsAnalysis(buf *bytes.Buffer, metrics *MetricsInfo) {
+	if metrics == nil {
+		return
+	}
+
+	buf.WriteString("<details>\n<summary>📊 Metrics Analysis</summary>\n\n")
+	buf.WriteString("Observed usage during analysis window:\n\n")
+	buf.WriteString("| Metric | Value |\n")
+	buf.WriteString("|--------|-------|\n")
+	if metrics.P95CPU != "" {
+		fmt.Fprintf(buf, "| P95 CPU | %s |\n", metrics.P95CPU)
+	}
+	if metrics.P99CPU != "" {
+		fmt.Fprintf(buf, "| P99 CPU | %s |\n", metrics.P99CPU)
+	}
+	if metrics.P95Memory != "" {
+		fmt.Fprintf(buf, "| P95 Memory | %s |\n", metrics.P95Memory)
+	}
+	if metrics.P99Memory != "" {
+		fmt.Fprintf(buf, "| P99 Memory | %s |\n", metrics.P99Memory)
+	}
+	buf.WriteString("\n")
+
+	buf.WriteString("**Calculation method:**\n")
+	buf.WriteString("- Requests are based on P95 usage + buffer (varies by intent)\n")
+	buf.WriteString("- Limits are based on P99 usage + buffer (varies by intent)\n\n")
+	buf.WriteString("</details>\n\n")
+}
+
+// writeIntentProfile writes the intent profile explanation to the buffer.
+func writeIntentProfile(buf *bytes.Buffer, intent string) {
+	if intent == "" {
+		return
+	}
+
+	buf.WriteString("### Intent Profile\n\n")
+	switch intent {
+	case "Eco":
+		buf.WriteString("**Eco** - Aggressive optimization for cost savings\n")
+		buf.WriteString("- Requests: P95 + 10% buffer\n")
+		buf.WriteString("- Limits: P99 + 20% buffer\n")
+		buf.WriteString("- Max change per PR: Unlimited\n\n")
+	case "Balanced":
+		buf.WriteString("**Balanced** - Balance between savings and headroom\n")
+		buf.WriteString("- Requests: P95 + 20% buffer\n")
+		buf.WriteString("- Limits: P99 + 30% buffer\n")
+		buf.WriteString("- Max change per PR: 50%\n\n")
+	case "Critical":
+		buf.WriteString("**Critical** - Conservative with extra headroom\n")
+		buf.WriteString("- Requests: P95 + 40% buffer\n")
+		buf.WriteString("- Limits: P99 + 50% buffer\n")
+		buf.WriteString("- Max change per PR: 30%\n\n")
+	}
 }

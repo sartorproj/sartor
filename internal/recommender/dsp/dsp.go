@@ -81,9 +81,9 @@ func (d *DSP) calculateFFTThreshold(values []float64) float64 {
 			permuted[j], permuted[k] = permuted[k], permuted[j]
 		}
 
-		fft := d.fft(permuted)
+		fftResult := d.fft(permuted)
 		maxAmp := 0.0
-		for _, val := range fft {
+		for _, val := range fftResult {
 			amp := cmplx.Abs(val)
 			if amp > maxAmp {
 				maxAmp = amp
@@ -98,13 +98,13 @@ func (d *DSP) calculateFFTThreshold(values []float64) float64 {
 
 // findCandidatePeriods finds candidate periods using FFT.
 func (d *DSP) findCandidatePeriods(values []float64, threshold float64) []int {
-	fft := d.fft(values)
+	fftResult := d.fft(values)
 	N := len(values)
 	candidates := make([]int, 0)
 
 	// Only consider first half (due to symmetry) and skip k=0, k=1
 	for k := 2; k <= N/2; k++ {
-		amplitude := cmplx.Abs(fft[k])
+		amplitude := cmplx.Abs(fftResult[k])
 		if amplitude > threshold {
 			candidates = append(candidates, k)
 		}
@@ -114,7 +114,7 @@ func (d *DSP) findCandidatePeriods(values []float64, threshold float64) []int {
 }
 
 // selectPeriodWithACF selects the best period using Autocorrelation Function.
-func (d *DSP) selectPeriodWithACF(values []float64, candidates []int, startTimestamp int64) (int64, float64) {
+func (d *DSP) selectPeriodWithACF(values []float64, candidates []int, _ int64) (int64, float64) {
 	if len(candidates) == 0 {
 		return 0, 0
 	}
@@ -173,9 +173,9 @@ func (d *DSP) calculateACF(values []float64) []float64 {
 	}
 
 	// Calculate ACF using FFT: ACF = IFFT(|FFT(x)|^2)
-	fft := d.fft(normalized)
-	fftSquared := make([]complex128, len(fft))
-	for i, val := range fft {
+	fftResult := d.fft(normalized)
+	fftSquared := make([]complex128, len(fftResult))
+	for i, val := range fftResult {
 		fftSquared[i] = val * cmplx.Conj(val)
 	}
 
@@ -300,10 +300,10 @@ func (d *DSP) PredictFFT(series []preprocessing.TimeSeries, config FFTConfig) []
 	values := preprocessing.ExtractValues(series)
 
 	// Perform FFT
-	fft := d.fft(values)
+	fftResult := d.fft(values)
 
 	// Filter frequency components
-	filteredFFT := d.filterFFT(fft, config)
+	filteredFFT := d.filterFFT(fftResult, config)
 
 	// Perform IFFT to get predicted values
 	predictedValues := d.ifft(filteredFFT)
@@ -330,14 +330,14 @@ func (d *DSP) PredictFFT(series []preprocessing.TimeSeries, config FFTConfig) []
 }
 
 // filterFFT filters FFT components based on configuration.
-func (d *DSP) filterFFT(fft []complex128, config FFTConfig) []complex128 {
-	N := len(fft)
+func (d *DSP) filterFFT(fftData []complex128, config FFTConfig) []complex128 {
+	N := len(fftData)
 	filtered := make([]complex128, N)
-	copy(filtered, fft)
+	copy(filtered, fftData)
 
 	// Filter by amplitude
 	amplitudes := make([]float64, N)
-	for i, val := range fft {
+	for i, val := range fftData {
 		amplitudes[i] = cmplx.Abs(val)
 	}
 

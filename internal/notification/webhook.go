@@ -160,7 +160,7 @@ func (w *WebhookNotifier) sendToWebhook(ctx context.Context, config WebhookConfi
 			lastErr = err
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return nil

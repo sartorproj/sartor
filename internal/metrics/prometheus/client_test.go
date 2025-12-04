@@ -102,7 +102,7 @@ func TestClient_CheckConnection(t *testing.T) {
 					"yaml": "global:\n  scrape_interval: 15s\n",
 				},
 			}
-			json.NewEncoder(w).Encode(config)
+			_ = json.NewEncoder(w).Encode(config)
 		} else {
 			w.WriteHeader(http.StatusNotFound)
 		}

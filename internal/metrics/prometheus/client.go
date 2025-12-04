@@ -274,17 +274,18 @@ func (c *Client) GetTimeSeriesMetrics(ctx context.Context, namespace, podNamePre
 	}
 
 	var query string
-	if resourceType == "cpu" {
+	switch resourceType {
+	case "cpu":
 		query = fmt.Sprintf(
 			`rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"%s.*", container="%s"}[1m])`,
 			namespace, podNamePrefix, containerName,
 		)
-	} else if resourceType == "memory" {
+	case "memory":
 		query = fmt.Sprintf(
 			`container_memory_working_set_bytes{namespace="%s", pod=~"%s.*", container="%s"}`,
 			namespace, podNamePrefix, containerName,
 		)
-	} else {
+	default:
 		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
 	}
 

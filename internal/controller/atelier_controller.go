@@ -167,13 +167,13 @@ func (r *AtelierReconciler) checkPrometheusConnection(ctx context.Context, ateli
 		}
 	}
 
-	client, err := prometheus.NewClient(config)
+	promClient, err := prometheus.NewClient(config)
 	if err != nil {
 		logger.Error(err, "Failed to create Prometheus client")
 		return false
 	}
 
-	if err := client.CheckConnection(ctx); err != nil {
+	if err := promClient.CheckConnection(ctx); err != nil {
 		logger.Error(err, "Prometheus connection check failed")
 		return false
 	}
@@ -258,10 +258,10 @@ func (r *AtelierReconciler) checkArgoCDConnection(ctx context.Context, atelier *
 		}
 	}
 
-	client := argocd.NewClient(cfg, r.Client)
+	argoClient := argocd.NewClient(cfg, r.Client)
 
 	// Try to list applications to verify connectivity
-	apps, err := client.ListApplications(ctx)
+	apps, err := argoClient.ListApplications(ctx)
 	if err != nil {
 		logger.Error(err, "ArgoCD connection check failed")
 		return false

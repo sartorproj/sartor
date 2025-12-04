@@ -28,6 +28,11 @@ import (
 	"github.com/sartorproj/sartor/internal/metrics/prometheus"
 )
 
+const (
+	cappedAtQuotaCPU    = "capped at ResourceQuota CPU limit"
+	cappedAtQuotaMemory = "capped at ResourceQuota memory limit"
+)
+
 // PercentileStrategy implements percentile-based recommendation (P95/P99).
 // This is the default strategy used by Sartor.
 type PercentileStrategy struct {
@@ -271,13 +276,13 @@ func (s *PercentileStrategy) applyQuotaLimits(rec *Recommendation, quota *Resour
 			cpuCopy := quota.CPULimit.DeepCopy()
 			rec.Requests.CPU = &cpuCopy
 			rec.Capped = true
-			rec.CappedReason = "capped at ResourceQuota CPU limit"
+			rec.CappedReason = cappedAtQuotaCPU
 		}
 		if rec.Limits.CPU != nil && rec.Limits.CPU.Cmp(*quota.CPULimit) > 0 {
 			cpuCopy := quota.CPULimit.DeepCopy()
 			rec.Limits.CPU = &cpuCopy
 			rec.Capped = true
-			rec.CappedReason = "capped at ResourceQuota CPU limit"
+			rec.CappedReason = cappedAtQuotaCPU
 		}
 	}
 
@@ -286,13 +291,13 @@ func (s *PercentileStrategy) applyQuotaLimits(rec *Recommendation, quota *Resour
 			memCopy := quota.MemoryLimit.DeepCopy()
 			rec.Requests.Memory = &memCopy
 			rec.Capped = true
-			rec.CappedReason = "capped at ResourceQuota memory limit"
+			rec.CappedReason = cappedAtQuotaMemory
 		}
 		if rec.Limits.Memory != nil && rec.Limits.Memory.Cmp(*quota.MemoryLimit) > 0 {
 			memCopy := quota.MemoryLimit.DeepCopy()
 			rec.Limits.Memory = &memCopy
 			rec.Capped = true
-			rec.CappedReason = "capped at ResourceQuota memory limit"
+			rec.CappedReason = cappedAtQuotaMemory
 		}
 	}
 }
@@ -342,7 +347,7 @@ func (s *PercentileStrategy) GetDefaultFitProfileSpec() FitProfileSpec {
 	}
 
 	var paramsSchema map[string]interface{}
-	json.Unmarshal([]byte(`{
+	_ = json.Unmarshal([]byte(`{
 		"type": "object",
 		"properties": {
 			"requestsBufferPercent": {

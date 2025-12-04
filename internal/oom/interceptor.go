@@ -40,6 +40,9 @@ const (
 
 	// OOMPatchCooldown is the minimum time between OOM patches for the same container.
 	OOMPatchCooldown = 10 * time.Minute
+
+	// kindDeployment is the Kubernetes Deployment kind.
+	kindDeployment = "Deployment"
 )
 
 // InterceptorConfig holds configuration for the OOM Interceptor.
@@ -143,7 +146,7 @@ func (i *Interceptor) findOwner(pod *corev1.Pod) (kind, name string) {
 			// Check if it's a ReplicaSet (owned by Deployment)
 			if ref.Kind == "ReplicaSet" {
 				// Try to find the Deployment that owns this ReplicaSet
-				return "Deployment", extractDeploymentName(ref.Name)
+				return kindDeployment, extractDeploymentName(ref.Name)
 			}
 			return ref.Kind, ref.Name
 		}
@@ -220,7 +223,7 @@ func (i *Interceptor) HandleOOMEvent(ctx context.Context, event OOMEvent) (*Patc
 func (i *Interceptor) shouldSkipDueToCooldown(ctx context.Context, event OOMEvent) bool {
 	// Check annotation on the workload
 	switch event.OwnerKind {
-	case "Deployment":
+	case kindDeployment:
 		deployment := &appsv1.Deployment{}
 		if err := i.client.Get(ctx, types.NamespacedName{
 			Name:      event.OwnerName,
@@ -281,7 +284,7 @@ func (i *Interceptor) calculateNewMemoryLimit(current *resource.Quantity) *resou
 // patchWorkload patches the workload with new memory limits.
 func (i *Interceptor) patchWorkload(ctx context.Context, event OOMEvent, newLimit *resource.Quantity) error {
 	switch event.OwnerKind {
-	case "Deployment":
+	case kindDeployment:
 		return i.patchDeployment(ctx, event, newLimit)
 	case "StatefulSet":
 		return i.patchStatefulSet(ctx, event, newLimit)

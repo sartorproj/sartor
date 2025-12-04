@@ -98,11 +98,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	atelier, err := r.getAtelier(ctx)
 	if err != nil {
 		logger.Error(err, "Failed to get Atelier")
-		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionFalse, "AtelierNotFound", err.Error())
-		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeReady, "AtelierNotFound", err.Error())
 	}
 
 	// Check if target workload exists
@@ -110,11 +106,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err != nil {
 		logger.Error(err, "Failed to get target workload")
 		tailoring.Status.TargetFound = false
-		r.setCondition(tailoring, ConditionTypeTargetFound, metav1.ConditionFalse, "TargetNotFound", err.Error())
-		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeTargetFound, "TargetNotFound", err.Error())
 	}
 	tailoring.Status.TargetFound = true
 	r.setCondition(tailoring, ConditionTypeTargetFound, metav1.ConditionTrue, "TargetFound", "Target workload found")
@@ -133,22 +125,14 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	promConfig, err := r.buildPrometheusConfig(ctx, atelier)
 	if err != nil {
 		logger.Error(err, "Failed to build Prometheus config")
-		r.setCondition(tailoring, ConditionTypeAnalyzed, metav1.ConditionFalse, "PrometheusConfigError", err.Error())
-		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "PrometheusConfigError", err.Error())
 	}
 
 	// Create Prometheus client
 	promClient, err := prometheus.NewClient(promConfig)
 	if err != nil {
 		logger.Error(err, "Failed to create Prometheus client")
-		r.setCondition(tailoring, ConditionTypeAnalyzed, metav1.ConditionFalse, "PrometheusClientError", err.Error())
-		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "PrometheusClientError", err.Error())
 	}
 
 	// Determine analysis window
@@ -163,11 +147,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.Namespace, tailoring.Spec.Target.Name, analysisWindow)
 	if err != nil {
 		logger.Error(err, "Failed to get container metrics")
-		r.setCondition(tailoring, ConditionTypeAnalyzed, metav1.ConditionFalse, "MetricsQueryError", err.Error())
-		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "MetricsQueryError", err.Error())
 	}
 
 	// Filter out excluded containers
@@ -175,11 +155,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if len(metrics) == 0 {
 		logger.Info("No metrics found for target workload")
-		r.setCondition(tailoring, ConditionTypeAnalyzed, metav1.ConditionFalse, "NoMetrics", "No metrics found for target workload")
-		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "NoMetrics", "No metrics found for target workload")
 	}
 
 	// Get safety rails and quota
@@ -194,20 +170,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	strategyName, strategyParams, enablePeakDetection, enableNormalization, safetyRailsOverride := r.resolveFitProfile(ctx, tailoring, atelier, logger)
 
 	// Apply safety rails override from FitProfile if provided
-	if safetyRailsOverride != nil {
-		if safetyRailsOverride.MinCPU != nil {
-			safetyRails.MinCPU = safetyRailsOverride.MinCPU
-		}
-		if safetyRailsOverride.MinMemory != nil {
-			safetyRails.MinMemory = safetyRailsOverride.MinMemory
-		}
-		if safetyRailsOverride.MaxCPU != nil {
-			safetyRails.MaxCPU = safetyRailsOverride.MaxCPU
-		}
-		if safetyRailsOverride.MaxMemory != nil {
-			safetyRails.MaxMemory = safetyRailsOverride.MaxMemory
-		}
-	}
+	applySafetyRailsOverride(&safetyRails, safetyRailsOverride)
 
 	// Calculate recommendations using strategy-based calculator
 	calculator := recommender.NewCalculator()
@@ -226,11 +189,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	)
 	if err != nil {
 		logger.Error(err, "Failed to calculate recommendations")
-		r.setCondition(tailoring, ConditionTypeAnalyzed, metav1.ConditionFalse, "CalculationError", err.Error())
-		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
-		}
-		return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "CalculationError", err.Error())
 	}
 
 	// Convert strategy recommendations to old format for compatibility
@@ -254,28 +213,18 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Check cooldown period
-	if tailoring.Status.LastPRUpdateTime != nil {
-		cooldown := 7 * 24 * time.Hour // Default 7 days
-		if atelier.Spec.PRSettings != nil && atelier.Spec.PRSettings.CooldownPeriod != nil {
-			cooldown = atelier.Spec.PRSettings.CooldownPeriod.Duration
+	if !r.checkCooldownPeriod(tailoring, atelier) {
+		logger.Info("Cooldown period not elapsed, skipping PR creation")
+		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "CooldownActive", "Cooldown period has not elapsed")
+		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
+			logger.Error(updateErr, "Failed to update status")
+			return ctrl.Result{}, updateErr
 		}
-		if time.Since(tailoring.Status.LastPRUpdateTime.Time) < cooldown {
-			logger.Info("Cooldown period not elapsed, skipping PR creation")
-			r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "CooldownActive", "Cooldown period has not elapsed")
-			if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-				logger.Error(updateErr, "Failed to update status")
-				return ctrl.Result{}, updateErr
-			}
-			return ctrl.Result{RequeueAfter: AnalysisRequeueInterval}, nil
-		}
+		return ctrl.Result{RequeueAfter: AnalysisRequeueInterval}, nil
 	}
 
 	// Check if changes exceed threshold
-	minChangePercent := int32(20) // Default 20%
-	if atelier.Spec.PRSettings != nil && atelier.Spec.PRSettings.MinChangePercent != nil {
-		minChangePercent = *atelier.Spec.PRSettings.MinChangePercent
-	}
-
+	minChangePercent := getMinChangePercent(atelier)
 	if !recommender.ShouldCreateCut(recommendations, currentResources, minChangePercent) {
 		logger.Info("Changes do not exceed threshold, skipping PR creation")
 		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "BelowThreshold", "Resource changes below threshold")
@@ -298,6 +247,60 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	return result, nil
+}
+
+// handleReconcileError handles an error during reconciliation by updating the status and returning the appropriate result.
+func (r *TailoringReconciler) handleReconcileError(
+	ctx context.Context,
+	tailoring *autoscalingv1alpha1.Tailoring,
+	logger logr.Logger,
+	conditionType, reason, message string,
+) (ctrl.Result, error) {
+	r.setCondition(tailoring, conditionType, metav1.ConditionFalse, reason, message)
+	if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
+		logger.Error(updateErr, "Failed to update status")
+	}
+	return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+}
+
+// applySafetyRailsOverride applies FitProfile safety rails overrides to the base safety rails.
+func applySafetyRailsOverride(safetyRails *recommender.SafetyRails, override *autoscalingv1alpha1.SafetyRailsConfig) {
+	if override == nil {
+		return
+	}
+	if override.MinCPU != nil {
+		safetyRails.MinCPU = override.MinCPU
+	}
+	if override.MinMemory != nil {
+		safetyRails.MinMemory = override.MinMemory
+	}
+	if override.MaxCPU != nil {
+		safetyRails.MaxCPU = override.MaxCPU
+	}
+	if override.MaxMemory != nil {
+		safetyRails.MaxMemory = override.MaxMemory
+	}
+}
+
+// checkCooldownPeriod checks if the cooldown period has elapsed since the last PR update.
+func (r *TailoringReconciler) checkCooldownPeriod(tailoring *autoscalingv1alpha1.Tailoring, atelier *autoscalingv1alpha1.Atelier) bool {
+	if tailoring.Status.LastPRUpdateTime == nil {
+		return true // No previous PR, cooldown doesn't apply
+	}
+	cooldown := 7 * 24 * time.Hour // Default 7 days
+	if atelier.Spec.PRSettings != nil && atelier.Spec.PRSettings.CooldownPeriod != nil {
+		cooldown = atelier.Spec.PRSettings.CooldownPeriod.Duration
+	}
+	return time.Since(tailoring.Status.LastPRUpdateTime.Time) >= cooldown
+}
+
+// getMinChangePercent returns the minimum change percentage threshold from atelier settings.
+func getMinChangePercent(atelier *autoscalingv1alpha1.Atelier) int32 {
+	minChangePercent := int32(20) // Default 20%
+	if atelier.Spec.PRSettings != nil && atelier.Spec.PRSettings.MinChangePercent != nil {
+		minChangePercent = *atelier.Spec.PRSettings.MinChangePercent
+	}
+	return minChangePercent
 }
 
 // getAtelier retrieves the Atelier configuration.
@@ -377,6 +380,7 @@ func convertResourceValues(rl corev1.ResourceList) *autoscalingv1alpha1.Resource
 }
 
 // checkForVPA checks if a VPA exists for the target workload.
+// nolint:unparam // Placeholder implementation - will return variable results when VPA support is added.
 func (r *TailoringReconciler) checkForVPA(ctx context.Context, tailoring *autoscalingv1alpha1.Tailoring) (bool, error) {
 	// Try to list VPAs in the namespace
 	vpaList := &autoscalingv2.HorizontalPodAutoscalerList{} // Using HPA as placeholder; real VPA would require vpav1 API
@@ -461,7 +465,7 @@ func (r *TailoringReconciler) getSafetyRails(atelier *autoscalingv1alpha1.Atelie
 func (r *TailoringReconciler) resolveFitProfile(
 	ctx context.Context,
 	tailoring *autoscalingv1alpha1.Tailoring,
-	atelier *autoscalingv1alpha1.Atelier,
+	_ *autoscalingv1alpha1.Atelier,
 	logger logr.Logger,
 ) (string, map[string]interface{}, bool, bool, *autoscalingv1alpha1.SafetyRailsConfig) {
 	// FitProfileRef is required
@@ -562,7 +566,7 @@ func (r *TailoringReconciler) buildAnalysisResult(metrics []prometheus.Container
 
 	for _, rec := range recommendations {
 		m := metricsMap[rec.ContainerName]
-		current, _ := currentResources[rec.ContainerName]
+		current := currentResources[rec.ContainerName]
 
 		containerRec := autoscalingv1alpha1.ContainerRecommendation{
 			Name:    rec.ContainerName,
