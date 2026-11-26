@@ -29,7 +29,7 @@
 - 📈 **Peak Detection**: Advanced algorithms for detecting anomalous peaks in resource usage
 - 🧹 **Data Preprocessing**: Automatic imputation, outlier removal, and normalization
 - 🔄 **GitOps Integration**: Creates PRs for raw YAML, Helm, and Kustomize
-- 🚨 **OOM Protection**: Automatically patches memory limits on OOMKilled events
+- 🚨 **OOM Protection** (opt-in): Raises memory limits after OOMKilled events for workloads with an active Tailoring
 - 🔗 **ArgoCD Support**: Auto-syncs ArgoCD applications after PR merge
 - 🛡️ **Safety Rails**: Configurable min/max limits to prevent over-optimization
 - ⏸️ **Dry-Run Mode**: Preview recommendations without creating PRs
@@ -40,7 +40,7 @@
 ### Prerequisites
 
 - Kubernetes cluster (v1.11.3+)
-- Prometheus instance with container metrics
+- Prometheus or VictoriaMetrics with cAdvisor container metrics (kube-state-metrics recommended)
 - Git repository access (GitHub, GitLab, or Bitbucket)
 - kubectl configured to access your cluster
 
@@ -188,7 +188,22 @@ flowchart TB
 2. **Analysis**: Recommendation engine calculates optimal resources using configured strategy
 3. **PR Creation**: Changes are proposed via Git pull requests (Raw YAML, Helm, or Kustomize)
 4. **GitOps Sync**: After PR merge, ArgoCD automatically syncs changes to the cluster
-5. **OOM Protection**: Controller monitors for OOMKilled events and can auto-patch limits
+5. **OOM Protection** (opt-in, `--enable-oom-patching`): Controller watches for OOMKilled pods and raises the memory limit of workloads that have a non-paused Tailoring
+
+### Controller Behaviour
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--analysis-interval` | `6h` | How often each Tailoring is re-analyzed. Status-only updates never trigger analysis; spec changes trigger it immediately. |
+| `--enable-oom-patching` | `false` | Registers the OOM controller. When off, Sartor does not watch Pods and never patches workloads. When on, it patches only workloads targeted by a non-paused Tailoring, skips excluded containers, and handles each OOM once per cooldown. |
+
+**Pod matching**: Metrics are matched to a workload's pods with kind-specific, anchored pod name patterns (for example `<name>-<hash>-<suffix>` for Deployments and `<name>-<ordinal>` for StatefulSets), so `backend` never picks up pods of `backend-cron`. When kube-state-metrics is present (`kube_pod_owner`, `kube_replicaset_owner`), pods are matched by their owner instead. Usage is aggregated with `max` across all pods of the workload.
+
+**Prometheus / VictoriaMetrics**: `spec.prometheus.url` may include a path prefix and query parameters, which are kept on every request. For example, `http://vmselect.example.svc:8481/select/0/prometheus` targets a VictoriaMetrics cluster tenant, and `http://victoria-metrics.example.svc:8428?extra_label=cluster=example-cluster` adds a label filter. The connectivity check runs the instant query `vector(1)`, which works on Prometheus, VictoriaMetrics single-node and vmselect.
+
+**Credentials**: Secrets referenced by an Atelier (`secretRef`) must live in the controller's namespace (`POD_NAMESPACE`, falling back to the service account namespace). References to other namespaces are rejected without reading the Secret and reported in the `SecretRefsValid` condition. Secrets are read directly from the API server, so the controller only needs `get` on Secrets in its own namespace.
+
+**Server CORS**: The API server sends no CORS headers by default. The UI calls the API same-origin through its proxy. Use `--cors-allowed-origins=https://ui.example.com` (comma-separated, `*` only if set explicitly) to allow cross-origin browsers. Preflight requests are answered before authentication.
 
 ## Concepts
 
