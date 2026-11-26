@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // jsonPatchOpReplace is the RFC 6902 JSON Patch "replace" operation.
@@ -145,18 +145,30 @@ func (w *KustomizeWriter) GeneratePatch(target PatchTarget, updates []ResourceUp
 
 // UpdatePatch updates an existing Kustomize patch with new resource values.
 func (w *KustomizeWriter) UpdatePatch(content []byte, updates []ResourceUpdate) ([]byte, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal(content, &root); err != nil {
+	return w.UpdatePatchFor(content, ManifestTarget{}, updates)
+}
+
+// UpdatePatchFor updates the strategic merge patch for target with new resource values.
+// Containers missing from the patch are appended (strategic merge matches them by name).
+func (w *KustomizeWriter) UpdatePatchFor(content []byte, target ManifestTarget, updates []ResourceUpdate) ([]byte, error) {
+	f, err := parseYAMLFile(content)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
 
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, fmt.Errorf("invalid YAML document")
+	var doc *yaml.Node
+	for i := range f.docs {
+		m, err := f.rootMapping(i)
+		if err != nil {
+			return nil, err
+		}
+		if documentMatches(m, target) {
+			doc = m
+			break
+		}
 	}
-
-	doc := root.Content[0]
-	if doc.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("expected mapping node at document root")
+	if doc == nil {
+		return nil, fmt.Errorf("%s %q not found in patch", target.Kind, target.Name)
 	}
 
 	// Navigate to spec.template.spec.containers
@@ -182,23 +194,16 @@ func (w *KustomizeWriter) UpdatePatch(content []byte, updates []ResourceUpdate) 
 
 	// Update each container
 	for _, update := range updates {
-		if err := updateContainerInPatch(containers, update); err != nil {
+		if err := updateContainerInPatch(f, containers, update); err != nil {
 			return nil, fmt.Errorf("failed to update container %s: %w", update.ContainerName, err)
 		}
 	}
 
-	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(&root); err != nil {
-		return nil, fmt.Errorf("failed to encode patch: %w", err)
-	}
-
-	return buf.Bytes(), nil
+	return f.render()
 }
 
 // updateContainerInPatch updates a container's resources in the patch.
-func updateContainerInPatch(containers *yaml.Node, update ResourceUpdate) error {
+func updateContainerInPatch(f *yamlFile, containers *yaml.Node, update ResourceUpdate) error {
 	if containers.Kind != yaml.SequenceNode {
 		return fmt.Errorf("containers is not a sequence")
 	}
@@ -219,49 +224,23 @@ func updateContainerInPatch(containers *yaml.Node, update ResourceUpdate) error 
 
 	// If container not found, add it
 	if containerNode == nil {
+		f.structural = true
 		containerNode = &yaml.Node{
 			Kind: yaml.MappingNode,
+			Tag:  tagMap,
 			Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "name"},
-				{Kind: yaml.ScalarNode, Value: update.ContainerName},
+				{Kind: yaml.ScalarNode, Tag: tagStr, Value: "name"},
+				{Kind: yaml.ScalarNode, Tag: tagStr, Value: update.ContainerName},
 			},
 		}
 		containers.Content = append(containers.Content, containerNode)
 	}
 
-	// Find or create resources node
-	resourcesIdx := findKeyIndex(containerNode, resourcesKey)
-	var resources *yaml.Node
-
-	if resourcesIdx == -1 {
-		keyNode := &yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: resourcesKey,
-		}
-		resources = &yaml.Node{
-			Kind:    yaml.MappingNode,
-			Content: []*yaml.Node{},
-		}
-		containerNode.Content = append(containerNode.Content, keyNode, resources)
-	} else {
-		resources = containerNode.Content[resourcesIdx+1]
+	resources, err := f.ensureMapping(containerNode, resourcesKey)
+	if err != nil {
+		return err
 	}
-
-	// Update requests
-	if update.Requests != nil {
-		if err := updateResourceSection(resources, "requests", update.Requests); err != nil {
-			return err
-		}
-	}
-
-	// Update limits
-	if update.Limits != nil {
-		if err := updateResourceSection(resources, "limits", update.Limits); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return updateResources(f, resources, update)
 }
 
 // JSONPatch represents a JSON Patch operation (RFC 6902).
@@ -333,87 +312,79 @@ type KustomizationEntry struct {
 
 // UpdateKustomization adds a patch reference to a kustomization.yaml file.
 func (w *KustomizeWriter) UpdateKustomization(content []byte, entry KustomizationEntry) ([]byte, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal(content, &root); err != nil {
+	f, err := parseYAMLFile(content)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse kustomization.yaml: %w", err)
 	}
-
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, fmt.Errorf("invalid kustomization.yaml")
+	doc, err := f.rootMapping(0)
+	if err != nil {
+		return nil, fmt.Errorf("invalid kustomization.yaml: %w", err)
 	}
 
-	doc := root.Content[0]
-	if doc.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("expected mapping node at document root")
-	}
-
-	// Find or create patches section
+	// Prefer "patches"; fall back to the legacy "patchesStrategicMerge" list of paths.
+	legacy := false
 	patchesIdx := findKeyIndex(doc, "patches")
-	var patches *yaml.Node
-
 	if patchesIdx == -1 {
-		// Try patchesStrategicMerge for older kustomization format
-		patchesIdx = findKeyIndex(doc, "patchesStrategicMerge")
+		if patchesIdx = findKeyIndex(doc, "patchesStrategicMerge"); patchesIdx != -1 {
+			legacy = true
+		}
 	}
 
+	var patches *yaml.Node
 	if patchesIdx == -1 {
-		// Create patches section
-		keyNode := &yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: "patches",
-		}
-		patches = &yaml.Node{
-			Kind:    yaml.SequenceNode,
-			Content: []*yaml.Node{},
-		}
-		doc.Content = append(doc.Content, keyNode, patches)
+		patches = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		doc.Content = append(doc.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: tagStr, Value: "patches"}, patches)
 	} else {
 		patches = doc.Content[patchesIdx+1]
+		if patches.Kind == yaml.ScalarNode && (patches.Tag == "!!null" || patches.Value == "") {
+			*patches = yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		}
+		if patches.Kind != yaml.SequenceNode {
+			return nil, fmt.Errorf("kustomization patches is not a list")
+		}
 	}
 
 	// Check if patch already exists
 	for _, patch := range patches.Content {
 		if patch.Kind == yaml.ScalarNode && patch.Value == entry.PatchPath {
-			// Patch already exists
 			return content, nil
 		}
 		if patch.Kind == yaml.MappingNode {
 			pathNode := findKey(patch, "path")
 			if pathNode != nil && pathNode.Value == entry.PatchPath {
-				// Patch already exists
 				return content, nil
 			}
 		}
 	}
 
-	// Add new patch entry
+	f.structural = true
+	if legacy {
+		patches.Content = append(patches.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: tagStr, Value: entry.PatchPath})
+		return f.render()
+	}
+
 	patchEntry := &yaml.Node{
 		Kind: yaml.MappingNode,
+		Tag:  tagMap,
 		Content: []*yaml.Node{
-			{Kind: yaml.ScalarNode, Value: "path"},
-			{Kind: yaml.ScalarNode, Value: entry.PatchPath},
-			{Kind: yaml.ScalarNode, Value: "target"},
+			{Kind: yaml.ScalarNode, Tag: tagStr, Value: "path"},
+			{Kind: yaml.ScalarNode, Tag: tagStr, Value: entry.PatchPath},
+			{Kind: yaml.ScalarNode, Tag: tagStr, Value: "target"},
 			{
 				Kind: yaml.MappingNode,
+				Tag:  tagMap,
 				Content: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Value: "kind"},
-					{Kind: yaml.ScalarNode, Value: entry.Target.Kind},
-					{Kind: yaml.ScalarNode, Value: "name"},
-					{Kind: yaml.ScalarNode, Value: entry.Target.Name},
+					{Kind: yaml.ScalarNode, Tag: tagStr, Value: "kind"},
+					{Kind: yaml.ScalarNode, Tag: tagStr, Value: entry.Target.Kind},
+					{Kind: yaml.ScalarNode, Tag: tagStr, Value: "name"},
+					{Kind: yaml.ScalarNode, Tag: tagStr, Value: entry.Target.Name},
 				},
 			},
 		},
 	}
 	patches.Content = append(patches.Content, patchEntry)
 
-	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(&root); err != nil {
-		return nil, fmt.Errorf("failed to encode kustomization.yaml: %w", err)
-	}
-
-	return buf.Bytes(), nil
+	return f.render()
 }
 
 // GeneratePatchFilename generates a filename for a Sartor patch.
