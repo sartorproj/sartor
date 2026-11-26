@@ -323,7 +323,3 @@ type TailoringList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Tailoring `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&Tailoring{}, &TailoringList{})
-}

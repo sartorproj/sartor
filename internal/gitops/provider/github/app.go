@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/go-github/v93/github"
 	"golang.org/x/oauth2"
 )
 
@@ -106,11 +107,11 @@ func (s *appTokenSource) Token() (*oauth2.Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	client, err := newGitHubClient(s.httpClient, s.baseURL)
+	client, err := newGitHubClient(s.httpClient, s.baseURL, github.WithAuthToken(jwt))
 	if err != nil {
 		return nil, err
 	}
-	tok, _, err := client.WithAuthToken(jwt).Apps.CreateInstallationToken(context.Background(), s.installationID, nil)
+	tok, _, err := client.Apps.CreateInstallationToken(context.Background(), s.installationID, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GitHub App installation token: %w", err)
 	}

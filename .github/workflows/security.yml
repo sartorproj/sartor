@@ -24,17 +24,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Setup Go
-      uses: actions/setup-go@v6
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version-file: go.mod
         cache-dependency-path: go.sum
 
     - name: Run Snyk to check for vulnerabilities
       id: snyk
-      uses: snyk/actions/golang@master
+      uses: snyk/actions/golang@11b673cfb4b0dc0d860a1323caa199d54950dcce # master
       continue-on-error: true
       env:
         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -51,7 +51,7 @@ jobs:
         fi
 
     - name: Upload Snyk result to GitHub Code Scanning
-      uses: github/codeql-action/upload-sarif@v4
+      uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
       if: steps.check-sarif.outputs.exists == 'true'
       with:
         sarif_file: snyk.sarif
@@ -61,19 +61,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v4
+      uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
       with:
         languages: go
         queries: security-and-quality
 
     - name: Autobuild
-      uses: github/codeql-action/autobuild@v4
+      uses: github/codeql-action/autobuild@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v4
+      uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
       with:
         category: /language:go
 
@@ -82,14 +82,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Build Controller image
       run: |
         docker build -t sartor-controller:scan -f Dockerfile .
 
     - name: Run Trivy vulnerability scanner (Controller)
-      uses: aquasecurity/trivy-action@master
+      uses: aquasecurity/trivy-action@38b337fff0a2f984d5be173c99e3f633438167ec # master
       with:
         image-ref: sartor-controller:scan
         format: sarif
@@ -97,7 +97,7 @@ jobs:
         severity: CRITICAL,HIGH
 
     - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v4
+      uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
       with:
         sarif_file: trivy-controller-results.sarif
 
@@ -106,10 +106,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Setup Go
-      uses: actions/setup-go@v6
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
       with:
         go-version-file: go.mod
         cache-dependency-path: go.sum

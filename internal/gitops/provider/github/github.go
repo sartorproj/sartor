@@ -23,7 +23,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/google/go-github/v60/github"
+	"github.com/google/go-github/v93/github"
 	"golang.org/x/oauth2"
 
 	"github.com/sartorproj/sartor/internal/gitops/provider"
@@ -94,12 +94,12 @@ func New(cfg Config) (*Provider, error) {
 	}, nil
 }
 
-func newGitHubClient(httpClient *http.Client, baseURL string) (*github.Client, error) {
-	client := github.NewClient(httpClient)
-	if baseURL == "" {
-		return client, nil
+func newGitHubClient(httpClient *http.Client, baseURL string, opts ...github.ClientOptionsFunc) (*github.Client, error) {
+	opts = append([]github.ClientOptionsFunc{github.WithHTTPClient(httpClient)}, opts...)
+	if baseURL != "" {
+		opts = append(opts, github.WithEnterpriseURLs(baseURL, baseURL))
 	}
-	client, err := client.WithEnterpriseURLs(baseURL, baseURL)
+	client, err := github.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GitHub Enterprise client: %w", err)
 	}
@@ -197,10 +197,7 @@ func (p *Provider) CreateBranch(ctx context.Context, repository, branchName, bas
 		return fmt.Errorf("failed to get base branch ref: %w", err)
 	}
 
-	newRef := &github.Reference{
-		Ref:    github.String("refs/heads/" + branchName),
-		Object: &github.GitObject{SHA: github.String(baseSHA)},
-	}
+	newRef := github.CreateRef{Ref: "refs/heads/" + branchName, SHA: baseSHA}
 
 	_, _, err = p.client.Git.CreateRef(ctx, owner, repo, newRef)
 	if err != nil {
@@ -226,17 +223,15 @@ func (p *Provider) ResetBranch(ctx context.Context, repository, branchName, base
 	if err != nil {
 		return err
 	}
-	ref := &github.Reference{
-		Ref:    github.String("refs/heads/" + branchName),
-		Object: &github.GitObject{SHA: github.String(baseSHA)},
-	}
+	ref := "refs/heads/" + branchName
 	if !exists {
-		if _, _, err := p.client.Git.CreateRef(ctx, owner, repo, ref); err != nil {
+		if _, _, err := p.client.Git.CreateRef(ctx, owner, repo, github.CreateRef{Ref: ref, SHA: baseSHA}); err != nil {
 			return fmt.Errorf("failed to create branch: %w", err)
 		}
 		return nil
 	}
-	if _, _, err := p.client.Git.UpdateRef(ctx, owner, repo, ref, true); err != nil {
+	update := github.UpdateRef{SHA: baseSHA, Force: new(true)}
+	if _, _, err := p.client.Git.UpdateRef(ctx, owner, repo, ref, update); err != nil {
 		return fmt.Errorf("failed to reset branch: %w", err)
 	}
 	return nil
@@ -277,10 +272,10 @@ func (p *Provider) Commit(ctx context.Context, req provider.CommitRequest) (stri
 	entries := make([]*github.TreeEntry, 0, len(req.Changes))
 	for _, change := range req.Changes {
 		entries = append(entries, &github.TreeEntry{
-			Path:    github.String(change.Path),
-			Mode:    github.String("100644"),
-			Type:    github.String("blob"),
-			Content: github.String(string(change.Content)),
+			Path:    new(change.Path),
+			Mode:    new("100644"),
+			Type:    new("blob"),
+			Content: new(string(change.Content)),
 		})
 	}
 
@@ -291,8 +286,8 @@ func (p *Provider) Commit(ctx context.Context, req provider.CommitRequest) (stri
 	}
 
 	// Create the commit
-	newCommit, _, err := p.client.Git.CreateCommit(ctx, owner, repo, &github.Commit{
-		Message: github.String(req.Message),
+	newCommit, _, err := p.client.Git.CreateCommit(ctx, owner, repo, github.Commit{
+		Message: new(req.Message),
 		Tree:    tree,
 		Parents: []*github.Commit{{SHA: ref.Object.SHA}},
 	}, nil)
@@ -301,8 +296,7 @@ func (p *Provider) Commit(ctx context.Context, req provider.CommitRequest) (stri
 	}
 
 	// Fast-forward the branch reference
-	ref.Object.SHA = newCommit.SHA
-	_, _, err = p.client.Git.UpdateRef(ctx, owner, repo, ref, false)
+	_, _, err = p.client.Git.UpdateRef(ctx, owner, repo, ref.GetRef(), github.UpdateRef{SHA: newCommit.GetSHA()})
 	if err != nil {
 		return "", fmt.Errorf("failed to update branch ref: %w", err)
 	}
@@ -317,11 +311,11 @@ func (p *Provider) CreatePullRequest(ctx context.Context, req provider.CreatePRR
 		return nil, err
 	}
 
-	pr, _, err := p.client.PullRequests.Create(ctx, owner, repo, &github.NewPullRequest{
-		Title: github.String(req.Title),
-		Body:  github.String(req.Body),
-		Head:  github.String(req.HeadBranch),
-		Base:  github.String(req.BaseBranch),
+	pr, _, err := p.client.PullRequests.Create(ctx, owner, repo, github.CreatePullRequest{
+		Title: new(req.Title),
+		Body:  new(req.Body),
+		Head:  req.HeadBranch,
+		Base:  req.BaseBranch,
 	})
 	if err != nil {
 		if isStatus(err, http.StatusUnprocessableEntity) && strings.Contains(err.Error(), "already exists") {
@@ -349,8 +343,8 @@ func (p *Provider) UpdatePullRequest(ctx context.Context, repository string, num
 		return nil, err
 	}
 	pr, _, err := p.client.PullRequests.Edit(ctx, owner, repo, number, &github.PullRequest{
-		Title: github.String(title),
-		Body:  github.String(body),
+		Title: new(title),
+		Body:  new(body),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to update pull request: %w", err)
@@ -436,8 +430,8 @@ func convertPullRequest(pr *github.PullRequest) *provider.PullRequest {
 func extractLabels(labels []*github.Label) []string {
 	result := make([]string, 0, len(labels))
 	for _, l := range labels {
-		if l.Name != nil {
-			result = append(result, *l.Name)
+		if l.Name != "" {
+			result = append(result, l.Name)
 		}
 	}
 	return result
