@@ -61,9 +61,9 @@ The Secret holds `username` and `password` for basic auth, or `token` for a bear
 | Backend | `url` |
 |---------|-------|
 | Prometheus | `http://prometheus.monitoring.svc:9090` |
-| VictoriaMetrics single-node | `http://victoria-metrics.monitoring.svc:8428` |
-| VictoriaMetrics cluster (tenant 0) | `http://vmselect.monitoring.svc:8481/select/0/prometheus` |
-| VictoriaMetrics cluster, one cluster's series only | `http://vmselect.monitoring.svc:8481/select/0/prometheus?extra_label=cluster=staging-base-cluster` |
+| VictoriaMetrics single-node | `http://victoria-metrics.example.svc:8428` |
+| VictoriaMetrics cluster (tenant 0) | `http://vmselect.example.svc:8481/select/0/prometheus` |
+| VictoriaMetrics cluster, one cluster's series only | `http://vmselect.example.svc:8481/select/0/prometheus?extra_label=cluster=example-cluster` |
 
 ### GitProviderConfig
 
@@ -112,7 +112,7 @@ prSettings:
     - "resource-optimization"
 ```
 
-Sartor's branch for a Tailoring is `<branchPrefix><namespace>/<name>`. If several clusters write to the same repository, give each its own `branchPrefix` (for example `sartor/staging/`) so their branches do not collide.
+Sartor's branch for a Tailoring is `<branchPrefix><namespace>/<name>`. If several clusters write to the same repository, give each its own `branchPrefix` (for example `sartor/example-cluster/`) so their branches do not collide.
 
 Closing a pull request with the `sartor-ignore` label sets `status.ignored` on the Tailoring; Sartor stops proposing changes for it. Remove the flag by editing the status or recreating the Tailoring.
 

@@ -261,7 +261,7 @@ func TestApplyErrorsWithoutWriting(t *testing.T) {
 }
 
 func TestApplyKustomizeCreatesPatchAndRegistersIt(t *testing.T) {
-	kustomization := "# staging overlay\nresources:\n- ../../base\n"
+	kustomization := "# example overlay\nresources:\n- ../../base\n"
 	p := fake.New("main", map[string]string{"overlays/stg/kustomization.yaml": kustomization})
 	req := baseRequest(autoscalingv1alpha1.WriteBackTypeKustomize, "overlays/stg/sartor-api.yaml", "")
 	req.Updates = cpuUpdate("150m")
@@ -275,7 +275,7 @@ func TestApplyKustomizeCreatesPatchAndRegistersIt(t *testing.T) {
 	assert.Contains(t, patch, "kind: Deployment")
 	assert.Contains(t, patch, "cpu: 150m")
 	k, _ := p.File(req.Branch, "overlays/stg/kustomization.yaml")
-	assert.Equal(t, "# staging overlay\nresources:\n- ../../base\npatches:\n- path: sartor-api.yaml\n  target:\n    kind: Deployment\n    name: api\n", k)
+	assert.Equal(t, "# example overlay\nresources:\n- ../../base\npatches:\n- path: sartor-api.yaml\n  target:\n    kind: Deployment\n    name: api\n", k)
 
 	again, err := Apply(context.Background(), p, req)
 	require.NoError(t, err)

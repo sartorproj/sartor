@@ -9,7 +9,7 @@ spec:
   prometheus:
     url: http://prometheus.monitoring.svc:9090
     # VictoriaMetrics cluster (vmselect, tenant 0), scoped to one cluster's series:
-    # url: http://vmselect.monitoring.svc:8481/select/0/prometheus?extra_label=cluster=staging-base-cluster
+    # url: http://vmselect.example.svc:8481/select/0/prometheus?extra_label=cluster=example-cluster
   gitProvider:
     type: github
     # Keys: token, or appId + installationId + privateKey (GitHub App).

@@ -43,7 +43,7 @@ spec:
   prometheus:
     url: http://prometheus.monitoring.svc.cluster.local:9090
     # VictoriaMetrics cluster, scoped to one cluster:
-    # url: http://vmselect.monitoring.svc:8481/select/0/prometheus?extra_label=cluster=staging-base-cluster
+    # url: http://vmselect.example.svc:8481/select/0/prometheus?extra_label=cluster=example-cluster
   gitProvider:
     type: github
     secretRef:

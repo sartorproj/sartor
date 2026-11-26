@@ -156,9 +156,9 @@ The API server (`cmd/server`) sends no CORS headers by default; the UI calls it 
 spec:
   prometheus:
     # Single-node VictoriaMetrics
-    url: http://victoria-metrics.monitoring.svc:8428
+    url: http://victoria-metrics.example.svc:8428
     # VictoriaMetrics cluster (vmselect, tenant 0), scoped to one cluster's series
-    # url: http://vmselect.monitoring.svc:8481/select/0/prometheus?extra_label=cluster=staging-base-cluster
+    # url: http://vmselect.example.svc:8481/select/0/prometheus?extra_label=cluster=example-cluster
     secretRef:          # optional; keys: username/password (basic) or token (bearer)
       name: vm-auth
       namespace: sartor-system
