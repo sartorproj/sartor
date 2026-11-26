@@ -27,6 +27,7 @@ prometheus:
     name: prometheus-auth
     namespace: sartor-system
   insecureSkipVerify: false
+  clusterLabel: cluster  # Optional: label holding the cluster name when one backend stores several clusters
 ```
 
 ### GitProviderConfig
@@ -98,6 +99,8 @@ The `Tailoring` resource is namespace-scoped and defines per-workload optimizati
 target:
   kind: Deployment  # Deployment, StatefulSet, DaemonSet
   name: my-app
+  namespace: my-namespace  # Optional: defaults to the Tailoring's namespace; used in queries and write-back
+  cluster: my-cluster      # Required when the Atelier sets prometheus.clusterLabel
 ```
 
 ### WriteBackConfig
@@ -124,6 +127,10 @@ writeBack:
 
 - `targetFound`: Whether target workload exists
 - `vpaDetected`: Whether VPA is managing the workload
+- `autoscalers`: HPAs, VPAs and KEDA ScaledObjects that target the workload
+- `oomKilledContainers`: Containers whose last termination was an OOM kill (metrics-only mode)
+- `consecutiveFailures`: Failed analyses in a row; drives the retry backoff
+- `nextAnalysisTime`: When the next analysis is scheduled
 - `lastAnalysis`: Latest analysis results
 - `recommendedResources`: Current recommendations
 - `lastCutRef`: Reference to most recent Cut
