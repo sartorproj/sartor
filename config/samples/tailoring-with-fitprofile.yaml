@@ -7,7 +7,6 @@ spec:
   target:
     kind: Deployment
     name: my-app
-  # Use FitProfile instead of legacy Intent/Strategy fields
   fitProfileRef:
     name: percentile-balanced
     namespace: default  # Optional, defaults to Tailoring's namespace
@@ -15,6 +14,8 @@ spec:
     repository: https://github.com/example/repo.git
     path: k8s/deployment.yaml
     branch: main
-    format: raw
-  analysisWindow: 7d
+    type: raw
+  analysisWindow: 168h
+  excludeContainers:
+    - istio-proxy
   paused: false

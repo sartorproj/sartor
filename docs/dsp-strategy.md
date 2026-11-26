@@ -113,12 +113,14 @@ Peaks are stored in recommendation metadata for analysis.
 
 ## Configuration Examples
 
+The snippets below are `FitProfile` specs; reference the FitProfile from a Tailoring with `spec.fitProfileRef`.
+
 ### Basic DSP with FFT
 
 ```yaml
 spec:
   strategy: "dsp"
-  strategyParameters:
+  parameters:
     method: "fft"
     marginFraction: 0.2
     lowAmplitudeThreshold: 1.0
@@ -130,7 +132,7 @@ spec:
 ```yaml
 spec:
   strategy: "dsp"
-  strategyParameters:
+  parameters:
     method: "maxValue"
     marginFraction: 0.15
 ```
@@ -140,8 +142,8 @@ spec:
 ```yaml
 spec:
   strategy: "dsp"
-  enablePeakDetection: true
-  strategyParameters:
+  parameters:
+    enablePeakDetection: true
     method: "fft"
     marginFraction: 0.2
 ```
@@ -151,9 +153,8 @@ spec:
 ```yaml
 spec:
   strategy: "dsp"
-  enableNormalization: true
-  enableOutlierRemoval: true
-  strategyParameters:
+  parameters:
+    enableNormalization: true
     method: "fft"
 ```
 
