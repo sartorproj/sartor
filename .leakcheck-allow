@@ -1,0 +1,7 @@
+# Exceptions for the generic leak checks (private IPs, private hostnames).
+# Never applies to denylist entries. One per line:
+#   path:<glob>      skip generic findings in matching files
+#   match:<string>   skip this exact IP or hostname everywhere
+# Synthetic fixtures and range documentation of the leak check itself:
+path:hack/leakcheck/test_leakcheck.py
+path:docs/leakcheck.md

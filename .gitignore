@@ -38,3 +38,9 @@ go.work
 # OS
 .DS_Store
 Thumbs.db
+
+# Leak check denylist (written at CI runtime from a secret; never commit)
+.leakcheck-denylist
+
+# Python bytecode (hack/leakcheck)
+__pycache__/
