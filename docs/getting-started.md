@@ -35,10 +35,20 @@ helm install sartor sartor/sartor \
 # Install CRDs and controller
 kubectl apply -f https://github.com/sartorproj/sartor/releases/latest/download/install.yaml
 
-# Or from source
+# Or from source, using a published image
 make install
-make deploy IMG=sartor-controller:latest
+make deploy IMG=ghcr.io/sartorproj/sartor:<version>
 ```
+
+Release tags (`v*`) publish multi-arch (`linux/amd64`, `linux/arm64`) distroless images that run as UID/GID `65532`:
+
+| Image | Dockerfile | Entrypoint |
+|-------|------------|------------|
+| `ghcr.io/sartorproj/sartor` | `Dockerfile` | `/manager` (`/controller` is a symlink) |
+| `ghcr.io/sartorproj/sartor-server` | `Dockerfile.server` | `/server` |
+
+Tags are the version without the leading `v` (e.g. `0.1.0`), `major.minor`, the raw git tag (e.g. `v0.1.0`) and `latest` for non-pre-releases.
+To build your own: `make docker-build docker-push IMG=<registry>/sartor:<tag>` (or `docker-buildx` / `docker-buildx-server` for multi-arch).
 
 ## Configuration
 

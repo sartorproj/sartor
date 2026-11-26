@@ -1,7 +1,13 @@
-# Build the controller binary
-FROM golang:1.26 AS builder
+# Build the controller binary.
+# The builder runs on the build host's platform and cross-compiles for TARGETOS/TARGETARCH,
+# so multi-arch builds never need QEMU emulation for the Go toolchain.
+# Base images are pinned to multi-arch index digests; Dependabot (docker ecosystem) bumps them.
+FROM --platform=$BUILDPLATFORM golang:1.27.4@sha256:5f1b98fa02fe396ebce2a0227a0e08309e11792915b9dd2e1f71053d7e7e6666 AS builder
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG DATE=unknown
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
@@ -9,23 +15,25 @@ COPY go.mod go.mod
 COPY go.sum go.sum
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Copy the Go source (relies on .dockerignore to filter)
 COPY . .
 
-# Build
-# the GOARCH has no default value to allow the binary to be built according to the host where the command
-# was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
-# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
-# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o controller cmd/controller/main.go
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+      -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
+      -o /out/manager ./cmd/controller \
+    && ln -s manager /out/controller
 
-# Use distroless as minimal base image to package the controller binary
+# distroless/static:nonroot ships CA certificates, tzdata and a 65532 "nonroot" user; no shell.
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 WORKDIR /
-COPY --from=builder /workspace/controller .
+# /manager is the binary; /controller is a symlink kept for older manifests.
+COPY --from=builder /out/ /
 USER 65532:65532
 
-ENTRYPOINT ["/controller"]
+ENTRYPOINT ["/manager"]
