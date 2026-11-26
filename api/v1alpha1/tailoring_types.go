@@ -236,6 +236,11 @@ type TailoringStatus struct {
 	// +optional
 	NextAnalysisTime *metav1.Time `json:"nextAnalysisTime,omitempty"`
 
+	// ObservedGeneration is the metadata.generation of the spec that
+	// LastAnalysis was computed from. A newer generation forces re-analysis.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// PRState is the current state of the Pull Request.
 	// +optional
 	PRState PRState `json:"prState,omitempty"`

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -26,10 +27,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	autoscalingv1alpha1 "github.com/sartorproj/sartor/api/v1alpha1"
 	"github.com/sartorproj/sartor/internal/gitops/argocd"
@@ -44,6 +46,9 @@ const (
 	ConditionTypeGitProviderConnected = "GitProviderConnected"
 	// ConditionTypeArgoCDConnected indicates ArgoCD connectivity.
 	ConditionTypeArgoCDConnected = "ArgoCDConnected"
+	// ConditionTypeSecretRefsValid indicates all secretRefs point to Secrets
+	// the controller is allowed to read.
+	ConditionTypeSecretRefsValid = "SecretRefsValid"
 
 	// ConnectivityCheckInterval is the interval between connectivity checks.
 	ConnectivityCheckInterval = 5 * time.Minute
@@ -53,13 +58,16 @@ const (
 type AtelierReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// ControllerNamespace is the only namespace credential Secrets are read from.
+	ControllerNamespace string
 }
 
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=ateliers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=ateliers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=ateliers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=tailorings,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups=argoproj.io,resources=applications,verbs=get;list;watch;update;patch
 
 // Reconcile implements the reconciliation loop for Atelier resources.
@@ -77,15 +85,27 @@ func (r *AtelierReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	logger.Info("Reconciling Atelier", "name", atelier.Name)
 
+	if err := validateSecretRefs(atelier, r.ControllerNamespace); err != nil {
+		logger.Error(err, "Atelier references a Secret outside the controller namespace")
+		r.setCondition(atelier, ConditionTypeSecretRefsValid, metav1.ConditionFalse, ReasonSecretNamespaceNotAllowed, err.Error())
+	} else {
+		r.setCondition(atelier, ConditionTypeSecretRefsValid, metav1.ConditionTrue, "Valid", "All secretRefs are in the controller namespace")
+	}
+
 	// Check Prometheus connectivity
-	prometheusConnected := r.checkPrometheusConnection(ctx, atelier)
+	promErr := r.checkPrometheusConnection(ctx, atelier)
+	prometheusConnected := promErr == nil
 	atelier.Status.PrometheusConnected = prometheusConnected
 	atelier.Status.LastPrometheusCheck = &metav1.Time{Time: time.Now()}
 
-	if prometheusConnected {
+	switch {
+	case prometheusConnected:
 		r.setCondition(atelier, ConditionTypePrometheusConnected, metav1.ConditionTrue, "Connected", "Prometheus connection successful")
-	} else {
-		r.setCondition(atelier, ConditionTypePrometheusConnected, metav1.ConditionFalse, "ConnectionFailed", "Failed to connect to Prometheus")
+	case IsSecretNamespaceError(promErr):
+		r.setCondition(atelier, ConditionTypePrometheusConnected, metav1.ConditionFalse, ReasonSecretNamespaceNotAllowed, promErr.Error())
+	default:
+		r.setCondition(atelier, ConditionTypePrometheusConnected, metav1.ConditionFalse, "ConnectionFailed",
+			fmt.Sprintf("Failed to connect to Prometheus: %v", promErr))
 	}
 
 	// Check Git provider connectivity
@@ -135,8 +155,28 @@ func (r *AtelierReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{RequeueAfter: ConnectivityCheckInterval}, nil
 }
 
-// checkPrometheusConnection tests the Prometheus connection.
-func (r *AtelierReconciler) checkPrometheusConnection(ctx context.Context, atelier *autoscalingv1alpha1.Atelier) bool {
+// validateSecretRefs checks that every secretRef in the Atelier can be read
+// under the controller-namespace restriction.
+func validateSecretRefs(atelier *autoscalingv1alpha1.Atelier, controllerNamespace string) error {
+	refs := []*corev1.SecretReference{atelier.Spec.Prometheus.SecretRef, &atelier.Spec.GitProvider.SecretRef}
+	if atelier.Spec.ArgoCD != nil {
+		refs = append(refs, atelier.Spec.ArgoCD.SecretRef)
+	}
+	var errs []error
+	for _, ref := range refs {
+		if ref == nil || ref.Name == "" {
+			continue
+		}
+		if _, err := secretKeyFor(controllerNamespace, *ref); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// checkPrometheusConnection tests the Prometheus connection. It returns nil
+// when the server answers queries.
+func (r *AtelierReconciler) checkPrometheusConnection(ctx context.Context, atelier *autoscalingv1alpha1.Atelier) error {
 	logger := log.FromContext(ctx)
 
 	config := prometheus.Config{
@@ -146,14 +186,10 @@ func (r *AtelierReconciler) checkPrometheusConnection(ctx context.Context, ateli
 
 	// Get credentials if configured
 	if atelier.Spec.Prometheus.SecretRef != nil {
-		secret := &corev1.Secret{}
-		secretKey := types.NamespacedName{
-			Name:      atelier.Spec.Prometheus.SecretRef.Name,
-			Namespace: atelier.Spec.Prometheus.SecretRef.Namespace,
-		}
-		if err := r.Get(ctx, secretKey, secret); err != nil {
+		secret, err := getCredentialSecret(ctx, r.Client, r.ControllerNamespace, *atelier.Spec.Prometheus.SecretRef)
+		if err != nil {
 			logger.Error(err, "Failed to get Prometheus secret")
-			return false
+			return err
 		}
 
 		if username, ok := secret.Data["username"]; ok {
@@ -170,15 +206,15 @@ func (r *AtelierReconciler) checkPrometheusConnection(ctx context.Context, ateli
 	promClient, err := prometheus.NewClient(config)
 	if err != nil {
 		logger.Error(err, "Failed to create Prometheus client")
-		return false
+		return err
 	}
 
 	if err := promClient.CheckConnection(ctx); err != nil {
 		logger.Error(err, "Prometheus connection check failed")
-		return false
+		return err
 	}
 
-	return true
+	return nil
 }
 
 // checkGitProviderConnection tests the Git provider connection.
@@ -186,12 +222,8 @@ func (r *AtelierReconciler) checkGitProviderConnection(ctx context.Context, atel
 	logger := log.FromContext(ctx)
 
 	// Get credentials
-	secret := &corev1.Secret{}
-	secretKey := types.NamespacedName{
-		Name:      atelier.Spec.GitProvider.SecretRef.Name,
-		Namespace: atelier.Spec.GitProvider.SecretRef.Namespace,
-	}
-	if err := r.Get(ctx, secretKey, secret); err != nil {
+	secret, err := getCredentialSecret(ctx, r.Client, r.ControllerNamespace, atelier.Spec.GitProvider.SecretRef)
+	if err != nil {
 		logger.Error(err, "Failed to get Git provider secret")
 		return false
 	}
@@ -239,12 +271,8 @@ func (r *AtelierReconciler) checkArgoCDConnection(ctx context.Context, atelier *
 		cfg.ServerURL = atelier.Spec.ArgoCD.ServerURL
 
 		if atelier.Spec.ArgoCD.SecretRef != nil {
-			secret := &corev1.Secret{}
-			secretKey := types.NamespacedName{
-				Name:      atelier.Spec.ArgoCD.SecretRef.Name,
-				Namespace: atelier.Spec.ArgoCD.SecretRef.Namespace,
-			}
-			if err := r.Get(ctx, secretKey, secret); err != nil {
+			secret, err := getCredentialSecret(ctx, r.Client, r.ControllerNamespace, *atelier.Spec.ArgoCD.SecretRef)
+			if err != nil {
 				logger.Error(err, "Failed to get ArgoCD secret")
 				return false
 			}
@@ -285,8 +313,10 @@ func (r *AtelierReconciler) setCondition(atelier *autoscalingv1alpha1.Atelier, c
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AtelierReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Status writes (connectivity timestamps) must not retrigger the
+	// reconcile; the periodic requeue drives the connectivity checks.
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&autoscalingv1alpha1.Atelier{}).
+		For(&autoscalingv1alpha1.Atelier{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named("atelier").
 		Complete(r)
 }
