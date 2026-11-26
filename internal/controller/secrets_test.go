@@ -33,6 +33,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	autoscalingv1alpha1 "github.com/sartorproj/sartor/api/v1alpha1"
+	"github.com/sartorproj/sartor/internal/gitops/provider"
+	fakegit "github.com/sartorproj/sartor/internal/gitops/provider/fake"
+	"github.com/sartorproj/sartor/internal/gitops/provider/github"
 )
 
 func TestResolveControllerNamespace(t *testing.T) {
@@ -144,17 +147,27 @@ func TestAtelierReconcile_SecretNamespaceRestriction(t *testing.T) {
 		atelier        *autoscalingv1alpha1.Atelier
 		wantValid      metav1.ConditionStatus
 		wantPromReason string
+		gitWriteBack   bool
 		wantGets       []types.NamespacedName
 	}{
 		{
 			name:           "refs in controller namespace are read",
+			gitWriteBack:   true,
 			atelier:        atelier("sartor", ""),
 			wantValid:      metav1.ConditionTrue,
 			wantPromReason: "ConnectionFailed",
 			wantGets:       []types.NamespacedName{{Namespace: "sartor", Name: "creds"}, {Namespace: "sartor", Name: "creds"}},
 		},
 		{
+			name:           "git write-back disabled: the Git Secret is not read",
+			atelier:        atelier("sartor", ""),
+			wantValid:      metav1.ConditionTrue,
+			wantPromReason: "ConnectionFailed",
+			wantGets:       []types.NamespacedName{{Namespace: "sartor", Name: "creds"}},
+		},
+		{
 			name:           "Prometheus ref in another namespace is rejected without reading it",
+			gitWriteBack:   true,
 			atelier:        atelier("kube-system", "sartor"),
 			wantValid:      metav1.ConditionFalse,
 			wantPromReason: ReasonSecretNamespaceNotAllowed,
@@ -165,13 +178,17 @@ func TestAtelierReconcile_SecretNamespaceRestriction(t *testing.T) {
 			atelier:        atelier("kube-system", "default"),
 			wantValid:      metav1.ConditionFalse,
 			wantPromReason: ReasonSecretNamespaceNotAllowed,
+			gitWriteBack:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c, gets := secretGetRecorder(t, tt.atelier, secret("sartor"), secret("kube-system"), secret("default"))
-			r := &AtelierReconciler{Client: c, Scheme: c.Scheme(), ControllerNamespace: "sartor"}
+			r := &AtelierReconciler{
+				Client: c, Scheme: c.Scheme(), ControllerNamespace: "sartor", EnableGitWriteBack: tt.gitWriteBack,
+				NewGitProvider: func(github.Config) (provider.Provider, error) { return fakegit.New("main", nil), nil },
+			}
 			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "default"}}); err != nil {
 				t.Fatalf("Reconcile: %v", err)
 			}
