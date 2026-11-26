@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -42,18 +42,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: latest
+          version: v2.15.0
           args: --timeout=5m
 
   # Stage 2: Test (depends on manifests and lint)
@@ -63,10 +63,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -74,12 +74,12 @@ jobs:
       - name: Setup envtest
         run: |
           # Match controller-runtime and k8s.io/api in go.mod; setup-envtest@latest may need a newer Go.
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.23
-          setup-envtest use 1.35.x --bin-dir "$PWD/bin"
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.25
+          setup-envtest use 1.37.x --bin-dir "$PWD/bin"
 
       - name: Run tests with coverage
         run: |
-          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.35.x --bin-dir "$PWD/bin" -p path)"
+          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.37.x --bin-dir "$PWD/bin" -p path)"
           go test -v -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Check coverage threshold
@@ -101,7 +101,7 @@ jobs:
           echo "✅ Coverage ${COVERAGE}% meets threshold ${THRESHOLD}%"
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         with:
           files: coverage.out
@@ -117,10 +117,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
