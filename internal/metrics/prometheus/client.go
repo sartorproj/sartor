@@ -173,7 +173,7 @@ func NewClient(cfg Config) (*Client, error) {
 // other Prometheus-compatible backends, and it exercises the same path,
 // query parameters and credentials as the real queries.
 func (c *Client) CheckConnection(ctx context.Context) error {
-	result, _, err := c.api.Query(ctx, "vector(1)", time.Now())
+	result, _, _, err := c.api.Query(ctx, "vector(1)", time.Now())
 	if err != nil {
 		return fmt.Errorf("failed to connect to Prometheus: %w", err)
 	}
@@ -198,7 +198,7 @@ func (c *Client) newSelector(ctx context.Context, namespace string, w Workload) 
 // ownerSeriesAvailable reports whether kube-state-metrics ownership series
 // exist for the workload. Any failure falls back to pod-name matching.
 func (c *Client) ownerSeriesAvailable(ctx context.Context, sel podSelector) bool {
-	result, _, err := c.api.Query(ctx, sel.ownerProbeQuery(), time.Now())
+	result, _, _, err := c.api.Query(ctx, sel.ownerProbeQuery(), time.Now())
 	if err != nil {
 		return false
 	}
@@ -284,7 +284,7 @@ func (c *Client) queryAndExtract(
 	metrics map[string]*ContainerMetrics,
 	setter func(*ContainerMetrics, float64),
 ) error {
-	result, warnings, err := c.api.Query(ctx, query, at)
+	result, warnings, _, err := c.api.Query(ctx, query, at)
 	if err != nil {
 		return err
 	}
@@ -378,7 +378,7 @@ func (c *Client) GetTimeSeriesMetrics(ctx context.Context, namespace string, wor
 	}
 	query := fmt.Sprintf(`max(%s)`, sel.scope(expr))
 
-	result, warnings, err := c.api.QueryRange(ctx, query, timeRange)
+	result, warnings, _, err := c.api.QueryRange(ctx, query, timeRange)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query Prometheus: %w", err)
 	}
