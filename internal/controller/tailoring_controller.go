@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -82,6 +83,9 @@ type TailoringReconciler struct {
 	// EnableGitWriteBack allows the controller to push changes and open PRs
 	// (--enable-git-writeback). When false the controller never touches git.
 	EnableGitWriteBack bool
+
+	// NewGitProvider creates the Git provider; defaults to DefaultGitProviderFactory.
+	NewGitProvider GitProviderFactory
 
 	// now returns the current time; overridable in tests.
 	now func() time.Time
@@ -277,25 +281,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.updateStatusAndRequeue(ctx, tailoring, logger)
 	}
 
-	// Check cooldown period
-	if !r.checkCooldownPeriod(tailoring, atelier) {
-		logger.Info("Cooldown period not elapsed, skipping PR creation")
-		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "CooldownActive", "Cooldown period has not elapsed")
-		return r.updateStatusAndRequeue(ctx, tailoring, logger)
-	}
-
-	// Check if changes exceed threshold
-	minChangePercent := getMinChangePercent(atelier)
-	if !recommender.ShouldCreateCut(recommendations, currentResources, minChangePercent) {
-		logger.Info("Changes do not exceed threshold, skipping PR creation")
-		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "BelowThreshold", "Resource changes below threshold")
-		return r.updateStatusAndRequeue(ctx, tailoring, logger)
-	}
-
-	// TODO: Handle Git PR operations directly
-	// For now, just mark as ready - Git operations will be implemented in a future update
-	logger.Info("Recommendations calculated, Git operations not yet implemented")
-	r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "Ready", "Recommendations calculated")
+	r.reconcileGitOps(ctx, tailoring, atelier, currentResources, logger)
 	return r.updateStatusAndRequeue(ctx, tailoring, logger)
 }
 
@@ -424,6 +410,13 @@ func (r *TailoringReconciler) getTargetResources(ctx context.Context, tailoring 
 	}
 
 	return resources, nil
+}
+
+func quantityString(q *resource.Quantity) string {
+	if q == nil {
+		return ""
+	}
+	return q.String()
 }
 
 // convertResourceValues converts corev1.ResourceList to autoscalingv1alpha1.ResourceValues.

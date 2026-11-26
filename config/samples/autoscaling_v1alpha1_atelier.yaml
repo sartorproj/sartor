@@ -4,6 +4,29 @@ metadata:
   labels:
     app.kubernetes.io/name: sartorproj
     app.kubernetes.io/managed-by: kustomize
-  name: atelier-sample
+  name: default
 spec:
-  # TODO(user): Add fields here
+  prometheus:
+    url: http://prometheus.monitoring.svc:9090
+    # VictoriaMetrics cluster (vmselect, tenant 0), scoped to one cluster's series:
+    # url: http://vmselect.example.svc:8481/select/0/prometheus?extra_label=cluster=example-cluster
+  gitProvider:
+    type: github
+    # Keys: token, or appId + installationId + privateKey (GitHub App).
+    # Must live in the controller's namespace.
+    secretRef:
+      name: github-token
+      namespace: sartor-system
+  prSettings:
+    cooldownPeriod: 168h
+    minChangePercent: 20
+    baseBranch: main
+    branchPrefix: sartor/
+    labels:
+      - sartor
+  safetyRails:
+    minCPU: 10m
+    minMemory: 64Mi
+    maxCPU: "8"
+    maxMemory: 32Gi
+  defaultAnalysisWindow: 168h

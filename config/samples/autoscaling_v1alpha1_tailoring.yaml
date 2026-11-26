@@ -5,5 +5,21 @@ metadata:
     app.kubernetes.io/name: sartorproj
     app.kubernetes.io/managed-by: kustomize
   name: tailoring-sample
+  namespace: default
 spec:
-  # TODO(user): Add fields here
+  target:
+    kind: Deployment
+    name: my-app
+  fitProfileRef:
+    name: percentile-balanced
+  analysisWindow: 168h
+  writeBack:
+    repository: github.com/example/gitops
+    path: apps/my-app/values.yaml
+    type: helm
+    # Map in values.yaml that holds requests/limits. For several containers:
+    # helmValuePath: "app=app.resources,worker=worker.resources"
+    helmValuePath: app.resources
+    branch: main
+  # Keep analyzing but never touch Git.
+  paused: false

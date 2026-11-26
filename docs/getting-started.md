@@ -1,56 +1,38 @@
 # Getting Started with Sartor
 
-This guide will help you get Sartor up and running in your Kubernetes cluster.
+This guide gets Sartor running in dry-run mode first (recommendations in status only), then enables GitHub write-back.
 
 ## Prerequisites
 
-Before installing Sartor, ensure you have:
-
-- **Kubernetes Cluster** (v1.11.3 or later)
-- **Prometheus** with container metrics exposed
-- **Git Repository** access (GitHub, GitLab, or Bitbucket)
+- **Kubernetes cluster**
+- **Prometheus-compatible metrics** with cAdvisor container metrics (`container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`). Prometheus and VictoriaMetrics both work.
+- **A GitHub repository** with your manifests, Helm values or Kustomize overlays (only for write-back)
 - **kubectl** configured to access your cluster
 
 ## Installation
 
-### Option 1: Helm (Recommended)
+### Option 1: Helm
 
 ```bash
-# Add the Helm repository
-helm repo add sartor https://sartorproj.github.io/sartor
-helm repo update
-
-# Install Sartor
-helm install sartor sartor/sartor \
+helm install sartor oci://ghcr.io/sartorproj/charts/sartor \
   --namespace sartor-system \
-  --create-namespace \
-  --set prometheus.url=http://prometheus:9090 \
-  --set gitProvider.type=github \
-  --set gitProvider.secretRef.name=github-token
+  --create-namespace
 ```
 
-### Option 2: kubectl
+The chart source and values live in [sartorproj/sartorproj-helm](https://github.com/sartorproj/sartorproj-helm).
+
+### Option 2: From source
 
 ```bash
-# Install CRDs and controller
-kubectl apply -f https://github.com/sartorproj/sartor/releases/latest/download/install.yaml
-
-# Or from source
-make install
-make deploy IMG=sartor-controller:latest
+make install                                    # CRDs
+make deploy IMG=ghcr.io/sartorproj/sartor:<tag>  # controller in sartor-system
 ```
+
+Out of the box the controller runs with `--enable-git-writeback=false` and `--enable-oom-patching=false`: it only reads metrics and writes Tailoring status.
 
 ## Configuration
 
-### Step 1: Create Git Provider Secret
-
-```bash
-kubectl create secret generic github-token \
-  --from-literal=token=YOUR_GITHUB_TOKEN \
-  -n sartor-system
-```
-
-### Step 2: Create Atelier
+### Step 1: Create an Atelier
 
 ```yaml
 apiVersion: autoscaling.sartorproj.io/v1alpha1
@@ -60,23 +42,39 @@ metadata:
 spec:
   prometheus:
     url: http://prometheus.monitoring.svc.cluster.local:9090
+    # VictoriaMetrics cluster, scoped to one cluster:
+    # url: http://vmselect.example.svc:8481/select/0/prometheus?extra_label=cluster=example-cluster
   gitProvider:
     type: github
     secretRef:
       name: github-token
       namespace: sartor-system
   prSettings:
-    cooldownPeriod: 168h  # 7 days
+    cooldownPeriod: 168h
     minChangePercent: 20
   safetyRails:
     minCPU: "10m"
     minMemory: "64Mi"
 ```
 
-Apply it:
-
 ```bash
 kubectl apply -f atelier.yaml
+```
+
+### Step 2: Create a FitProfile
+
+```yaml
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: FitProfile
+metadata:
+  name: percentile-balanced
+  namespace: production
+spec:
+  strategy: percentile
+  parameters:
+    requestsBufferPercent: 20
+    limitsBufferPercent: 30
+    maxChangePercent: 50
 ```
 
 ### Step 3: Create Your First Tailoring
@@ -91,16 +89,15 @@ spec:
   target:
     kind: Deployment
     name: my-app
-  intent: Balanced
+  fitProfileRef:
+    name: percentile-balanced
+  analysisWindow: 168h
   writeBack:
-    strategy: RawYAML
-    repository: "myorg/manifests"
-    path: "apps/my-app/deployment.yaml"
-    branch: "main"
-  analysisWindow: 168h  # 7 days
+    repository: github.com/myorg/manifests
+    path: apps/my-app/deployment.yaml
+    type: raw
+    branch: main
 ```
-
-Apply it:
 
 ```bash
 kubectl apply -f tailoring.yaml
@@ -108,29 +105,36 @@ kubectl apply -f tailoring.yaml
 
 ## Verification
 
-Check that Sartor is working:
-
 ```bash
-# Check controller is running
+# Controller is running
 kubectl get pods -n sartor-system
 
-# Check Atelier status
-kubectl get atelier default -o yaml
+# Prometheus connectivity
+kubectl get atelier default
 
-# Check Tailoring status
-kubectl get tailoring my-app -n production -o yaml
-
-# Watch for Cut resources (PRs)
-kubectl get cuts -n production -w
+# Recommendations for the workload
+kubectl get tailoring my-app -n production -o jsonpath='{.status.lastAnalysis}'
 ```
+
+## Enabling Git write-back
+
+1. Create the GitHub credentials Secret in the controller's namespace, either a token or a GitHub App:
+
+   ```bash
+   kubectl -n sartor-system create secret generic github-token \
+     --from-literal=appId=123456 \
+     --from-literal=installationId=7890123 \
+     --from-file=privateKey=sartor.private-key.pem
+   ```
+
+2. Start the controller with `--enable-git-writeback` (and make sure `POD_NAMESPACE` is set, which the provided manifests do).
+
+3. Watch the Tailoring: `status.prUrl` points to the pull request, and the `PRCreated` condition explains why none was opened (for example `BelowThreshold` or `CooldownActive`).
+
+Set `spec.paused: true` on a Tailoring to keep analyzing it without any Git activity.
 
 ## Next Steps
 
-- Learn about [Intent Profiles](intent-profiles.md)
-- Configure [GitOps Integration](gitops-integration.md)
-- Set up [ArgoCD](argocd-setup.md)
-- Explore the [API Reference](api-reference.md)
-
-## Troubleshooting
-
-See the [Troubleshooting Guide](troubleshooting.md) for common issues.
+- [Configuration Reference](configuration.md)
+- [Recommendation Strategies](recommendation-strategies.md)
+- [DSP Strategy](dsp-strategy.md)
