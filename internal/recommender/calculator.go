@@ -74,7 +74,7 @@ func (c *Calculator) Calculate(
 	s, exists := c.registry.Get(strategyName)
 	if !exists {
 		// Fallback to percentile if strategy not found
-		s, _ = c.registry.Get("percentile")
+		s, _ = c.registry.Get(strategy.StrategyNamePercentile)
 		if s == nil {
 			return nil, fmt.Errorf("no strategy available")
 		}

@@ -481,7 +481,7 @@ func (r *TailoringReconciler) resolveFitProfile(
 	}, fitProfile); err != nil {
 		logger.Error(err, "Failed to get FitProfile")
 		// Return defaults - this will cause an error downstream but we'll handle it gracefully
-		return "percentile", make(map[string]interface{}), false, false, nil
+		return strategy.StrategyNamePercentile, make(map[string]interface{}), false, false, nil
 	}
 
 	// Extract parameters from FitProfile
