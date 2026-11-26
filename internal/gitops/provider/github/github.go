@@ -18,8 +18,9 @@ package github
 
 import (
 	"context"
-	"encoding/base64"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/google/go-github/v60/github"
@@ -29,11 +30,32 @@ import (
 )
 
 // Config holds the configuration for the GitHub provider.
+// Either Token or the GitHub App fields (AppID, InstallationID, PrivateKey) must be set.
 type Config struct {
-	// Token is the GitHub personal access token.
+	// Token is a GitHub personal access token (classic or fine-grained).
 	Token string
 	// BaseURL is the GitHub API base URL (for GitHub Enterprise).
 	BaseURL string
+
+	// AppID is the GitHub App ID.
+	AppID int64
+	// InstallationID is the GitHub App installation ID for the target organization.
+	InstallationID int64
+	// PrivateKey is the PEM-encoded GitHub App private key.
+	PrivateKey []byte
+}
+
+// IsApp reports whether the config uses GitHub App authentication.
+func (c Config) IsApp() bool {
+	return c.Token == ""
+}
+
+// Validate checks that a token or complete GitHub App credentials are configured.
+func (c Config) Validate() error {
+	if c.IsApp() && (c.AppID == 0 || c.InstallationID == 0 || len(c.PrivateKey) == 0) {
+		return fmt.Errorf("GitHub authentication requires a token, or appId, installationId and privateKey")
+	}
+	return nil
 }
 
 // Provider implements the provider.Provider interface for GitHub.
@@ -44,28 +66,44 @@ type Provider struct {
 
 // New creates a new GitHub provider.
 func New(cfg Config) (*Provider, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	ctx := context.Background()
-	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: cfg.Token},
-	)
-	tc := oauth2.NewClient(ctx, ts)
 
-	var client *github.Client
-	var err error
-
-	if cfg.BaseURL != "" {
-		client, err = github.NewClient(tc).WithEnterpriseURLs(cfg.BaseURL, cfg.BaseURL)
+	var ts oauth2.TokenSource
+	if cfg.IsApp() {
+		src, err := newAppTokenSource(cfg, http.DefaultClient)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create GitHub Enterprise client: %w", err)
+			return nil, err
 		}
+		ts = oauth2.ReuseTokenSource(nil, src)
 	} else {
-		client = github.NewClient(tc)
+		ts = oauth2.StaticTokenSource(&oauth2.Token{AccessToken: cfg.Token})
+	}
+
+	client, err := newGitHubClient(oauth2.NewClient(ctx, ts), cfg.BaseURL)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Provider{
 		client: client,
 		config: cfg,
 	}, nil
+}
+
+func newGitHubClient(httpClient *http.Client, baseURL string) (*github.Client, error) {
+	client := github.NewClient(httpClient)
+	if baseURL == "" {
+		return client, nil
+	}
+	client, err := client.WithEnterpriseURLs(baseURL, baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GitHub Enterprise client: %w", err)
+	}
+	return client, nil
 }
 
 // Name returns the provider name.
@@ -75,7 +113,13 @@ func (p *Provider) Name() string {
 
 // CheckConnection verifies the connection to GitHub.
 func (p *Provider) CheckConnection(ctx context.Context) error {
-	_, _, err := p.client.Users.Get(ctx, "")
+	var err error
+	if p.config.IsApp() {
+		// Installation tokens cannot call /user.
+		_, _, err = p.client.Apps.ListRepos(ctx, &github.ListOptions{PerPage: 1})
+	} else {
+		_, _, err = p.client.Users.Get(ctx, "")
+	}
 	if err != nil {
 		return fmt.Errorf("failed to connect to GitHub: %w", err)
 	}
@@ -91,7 +135,13 @@ func parseRepository(repository string) (owner, repo string, err error) {
 	return parts[0], parts[1], nil
 }
 
+func isStatus(err error, code int) bool {
+	var ghErr *github.ErrorResponse
+	return errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == code
+}
+
 // GetFileContent retrieves the content of a file from a repository.
+// It returns an error wrapping provider.ErrNotFound if the file does not exist.
 func (p *Provider) GetFileContent(ctx context.Context, repository, path, ref string) ([]byte, error) {
 	owner, repo, err := parseRepository(repository)
 	if err != nil {
@@ -101,11 +151,14 @@ func (p *Provider) GetFileContent(ctx context.Context, repository, path, ref str
 	opts := &github.RepositoryContentGetOptions{Ref: ref}
 	fileContent, _, _, err := p.client.Repositories.GetContents(ctx, owner, repo, path, opts)
 	if err != nil {
+		if isStatus(err, http.StatusNotFound) {
+			return nil, fmt.Errorf("%s@%s: %w", path, ref, provider.ErrNotFound)
+		}
 		return nil, fmt.Errorf("failed to get file content: %w", err)
 	}
 
 	if fileContent == nil {
-		return nil, fmt.Errorf("file not found: %s", path)
+		return nil, fmt.Errorf("%s is not a file: %w", path, provider.ErrNotFound)
 	}
 
 	content, err := fileContent.GetContent()
@@ -116,6 +169,22 @@ func (p *Provider) GetFileContent(ctx context.Context, repository, path, ref str
 	return []byte(content), nil
 }
 
+// GetBranchSHA returns the commit SHA the branch points to.
+func (p *Provider) GetBranchSHA(ctx context.Context, repository, branchName string) (string, error) {
+	owner, repo, err := parseRepository(repository)
+	if err != nil {
+		return "", err
+	}
+	ref, _, err := p.client.Git.GetRef(ctx, owner, repo, "refs/heads/"+branchName)
+	if err != nil {
+		if isStatus(err, http.StatusNotFound) {
+			return "", fmt.Errorf("branch %s: %w", branchName, provider.ErrNotFound)
+		}
+		return "", fmt.Errorf("failed to get branch ref: %w", err)
+	}
+	return ref.GetObject().GetSHA(), nil
+}
+
 // CreateBranch creates a new branch from the given base.
 func (p *Provider) CreateBranch(ctx context.Context, repository, branchName, baseBranch string) error {
 	owner, repo, err := parseRepository(repository)
@@ -123,16 +192,14 @@ func (p *Provider) CreateBranch(ctx context.Context, repository, branchName, bas
 		return err
 	}
 
-	// Get the SHA of the base branch
-	baseRef, _, err := p.client.Git.GetRef(ctx, owner, repo, "refs/heads/"+baseBranch)
+	baseSHA, err := p.GetBranchSHA(ctx, repository, baseBranch)
 	if err != nil {
 		return fmt.Errorf("failed to get base branch ref: %w", err)
 	}
 
-	// Create the new branch
 	newRef := &github.Reference{
 		Ref:    github.String("refs/heads/" + branchName),
-		Object: &github.GitObject{SHA: baseRef.Object.SHA},
+		Object: &github.GitObject{SHA: github.String(baseSHA)},
 	}
 
 	_, _, err = p.client.Git.CreateRef(ctx, owner, repo, newRef)
@@ -143,22 +210,48 @@ func (p *Provider) CreateBranch(ctx context.Context, repository, branchName, bas
 	return nil
 }
 
-// BranchExists checks if a branch exists.
-func (p *Provider) BranchExists(ctx context.Context, repository, branchName string) (bool, error) {
+// ResetBranch points branchName at the head of baseBranch, creating it if needed.
+func (p *Provider) ResetBranch(ctx context.Context, repository, branchName, baseBranch string) error {
 	owner, repo, err := parseRepository(repository)
 	if err != nil {
-		return false, err
+		return err
 	}
 
-	_, _, err = p.client.Git.GetRef(ctx, owner, repo, "refs/heads/"+branchName)
+	baseSHA, err := p.GetBranchSHA(ctx, repository, baseBranch)
 	if err != nil {
-		if strings.Contains(err.Error(), "404") {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to check branch: %w", err)
+		return fmt.Errorf("failed to get base branch ref: %w", err)
 	}
 
-	return true, nil
+	exists, err := p.BranchExists(ctx, repository, branchName)
+	if err != nil {
+		return err
+	}
+	ref := &github.Reference{
+		Ref:    github.String("refs/heads/" + branchName),
+		Object: &github.GitObject{SHA: github.String(baseSHA)},
+	}
+	if !exists {
+		if _, _, err := p.client.Git.CreateRef(ctx, owner, repo, ref); err != nil {
+			return fmt.Errorf("failed to create branch: %w", err)
+		}
+		return nil
+	}
+	if _, _, err := p.client.Git.UpdateRef(ctx, owner, repo, ref, true); err != nil {
+		return fmt.Errorf("failed to reset branch: %w", err)
+	}
+	return nil
+}
+
+// BranchExists checks if a branch exists.
+func (p *Provider) BranchExists(ctx context.Context, repository, branchName string) (bool, error) {
+	_, err := p.GetBranchSHA(ctx, repository, branchName)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, provider.ErrNotFound) {
+		return false, nil
+	}
+	return false, fmt.Errorf("failed to check branch: %w", err)
 }
 
 // Commit creates a commit with the given changes.
@@ -175,7 +268,7 @@ func (p *Provider) Commit(ctx context.Context, req provider.CommitRequest) (stri
 	}
 
 	// Get the tree of the current commit
-	commit, _, err := p.client.Git.GetCommit(ctx, owner, repo, *ref.Object.SHA)
+	commit, _, err := p.client.Git.GetCommit(ctx, owner, repo, ref.GetObject().GetSHA())
 	if err != nil {
 		return "", fmt.Errorf("failed to get commit: %w", err)
 	}
@@ -183,18 +276,16 @@ func (p *Provider) Commit(ctx context.Context, req provider.CommitRequest) (stri
 	// Create tree entries for each file change
 	entries := make([]*github.TreeEntry, 0, len(req.Changes))
 	for _, change := range req.Changes {
-		content := base64.StdEncoding.EncodeToString(change.Content)
 		entries = append(entries, &github.TreeEntry{
 			Path:    github.String(change.Path),
 			Mode:    github.String("100644"),
 			Type:    github.String("blob"),
 			Content: github.String(string(change.Content)),
 		})
-		_ = content // silence unused warning
 	}
 
 	// Create a new tree
-	tree, _, err := p.client.Git.CreateTree(ctx, owner, repo, *commit.Tree.SHA, entries)
+	tree, _, err := p.client.Git.CreateTree(ctx, owner, repo, commit.GetTree().GetSHA(), entries)
 	if err != nil {
 		return "", fmt.Errorf("failed to create tree: %w", err)
 	}
@@ -209,14 +300,14 @@ func (p *Provider) Commit(ctx context.Context, req provider.CommitRequest) (stri
 		return "", fmt.Errorf("failed to create commit: %w", err)
 	}
 
-	// Update the branch reference
+	// Fast-forward the branch reference
 	ref.Object.SHA = newCommit.SHA
 	_, _, err = p.client.Git.UpdateRef(ctx, owner, repo, ref, false)
 	if err != nil {
 		return "", fmt.Errorf("failed to update branch ref: %w", err)
 	}
 
-	return *newCommit.SHA, nil
+	return newCommit.GetSHA(), nil
 }
 
 // CreatePullRequest creates a new pull request.
@@ -233,6 +324,9 @@ func (p *Provider) CreatePullRequest(ctx context.Context, req provider.CreatePRR
 		Base:  github.String(req.BaseBranch),
 	})
 	if err != nil {
+		if isStatus(err, http.StatusUnprocessableEntity) && strings.Contains(err.Error(), "already exists") {
+			return nil, fmt.Errorf("failed to create pull request: %w", provider.ErrAlreadyExists)
+		}
 		return nil, fmt.Errorf("failed to create pull request: %w", err)
 	}
 
@@ -245,14 +339,23 @@ func (p *Provider) CreatePullRequest(ctx context.Context, req provider.CreatePRR
 		}
 	}
 
-	return &provider.PullRequest{
-		Number:   *pr.Number,
-		URL:      *pr.HTMLURL,
-		State:    *pr.State,
-		Title:    *pr.Title,
-		Labels:   extractLabels(pr.Labels),
-		IsMerged: pr.GetMerged(),
-	}, nil
+	return convertPullRequest(pr), nil
+}
+
+// UpdatePullRequest updates the title and body of an existing pull request.
+func (p *Provider) UpdatePullRequest(ctx context.Context, repository string, number int, title, body string) (*provider.PullRequest, error) {
+	owner, repo, err := parseRepository(repository)
+	if err != nil {
+		return nil, err
+	}
+	pr, _, err := p.client.PullRequests.Edit(ctx, owner, repo, number, &github.PullRequest{
+		Title: github.String(title),
+		Body:  github.String(body),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to update pull request: %w", err)
+	}
+	return convertPullRequest(pr), nil
 }
 
 // GetPullRequest retrieves a pull request by number.
@@ -267,18 +370,20 @@ func (p *Provider) GetPullRequest(ctx context.Context, repository string, number
 		return nil, fmt.Errorf("failed to get pull request: %w", err)
 	}
 
-	return &provider.PullRequest{
-		Number:   *pr.Number,
-		URL:      *pr.HTMLURL,
-		State:    *pr.State,
-		Title:    *pr.Title,
-		Labels:   extractLabels(pr.Labels),
-		IsMerged: pr.GetMerged(),
-	}, nil
+	return convertPullRequest(pr), nil
 }
 
 // GetPullRequestByBranch retrieves a pull request by head branch.
 func (p *Provider) GetPullRequestByBranch(ctx context.Context, repository, headBranch string) (*provider.PullRequest, error) {
+	return p.findPullRequest(ctx, repository, headBranch, "", "all")
+}
+
+// FindOpenPullRequest returns the open pull request from headBranch into baseBranch, or nil.
+func (p *Provider) FindOpenPullRequest(ctx context.Context, repository, headBranch, baseBranch string) (*provider.PullRequest, error) {
+	return p.findPullRequest(ctx, repository, headBranch, baseBranch, "open")
+}
+
+func (p *Provider) findPullRequest(ctx context.Context, repository, headBranch, baseBranch, state string) (*provider.PullRequest, error) {
 	owner, repo, err := parseRepository(repository)
 	if err != nil {
 		return nil, err
@@ -286,7 +391,8 @@ func (p *Provider) GetPullRequestByBranch(ctx context.Context, repository, headB
 
 	prs, _, err := p.client.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
 		Head:  owner + ":" + headBranch,
-		State: "all",
+		Base:  baseBranch,
+		State: state,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pull requests: %w", err)
@@ -296,15 +402,7 @@ func (p *Provider) GetPullRequestByBranch(ctx context.Context, repository, headB
 		return nil, nil
 	}
 
-	pr := prs[0]
-	return &provider.PullRequest{
-		Number:   *pr.Number,
-		URL:      *pr.HTMLURL,
-		State:    *pr.State,
-		Title:    *pr.Title,
-		Labels:   extractLabels(pr.Labels),
-		IsMerged: pr.GetMerged(),
-	}, nil
+	return convertPullRequest(prs[0]), nil
 }
 
 // HasLabel checks if a PR has a specific label.
@@ -321,6 +419,17 @@ func (p *Provider) HasLabel(ctx context.Context, repository string, number int, 
 	}
 
 	return false, nil
+}
+
+func convertPullRequest(pr *github.PullRequest) *provider.PullRequest {
+	return &provider.PullRequest{
+		Number:   pr.GetNumber(),
+		URL:      pr.GetHTMLURL(),
+		State:    pr.GetState(),
+		Title:    pr.GetTitle(),
+		Labels:   extractLabels(pr.Labels),
+		IsMerged: pr.GetMerged(),
+	}
 }
 
 // extractLabels extracts label names from GitHub label objects.

@@ -61,6 +61,9 @@ type AtelierReconciler struct {
 
 	// ControllerNamespace is the only namespace credential Secrets are read from.
 	ControllerNamespace string
+	// EnableGitWriteBack enables the Git provider connectivity check. When false
+	// the controller never contacts the Git provider.
+	EnableGitWriteBack bool
 }
 
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=ateliers,verbs=get;list;watch;create;update;patch;delete
@@ -109,14 +112,16 @@ func (r *AtelierReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Check Git provider connectivity
-	gitConnected := r.checkGitProviderConnection(ctx, atelier)
-	atelier.Status.GitProviderConnected = gitConnected
-	atelier.Status.LastGitProviderCheck = &metav1.Time{Time: time.Now()}
+	if r.EnableGitWriteBack {
+		gitConnected := r.checkGitProviderConnection(ctx, atelier)
+		atelier.Status.GitProviderConnected = gitConnected
+		atelier.Status.LastGitProviderCheck = &metav1.Time{Time: time.Now()}
 
-	if gitConnected {
-		r.setCondition(atelier, ConditionTypeGitProviderConnected, metav1.ConditionTrue, "Connected", "Git provider connection successful")
-	} else {
-		r.setCondition(atelier, ConditionTypeGitProviderConnected, metav1.ConditionFalse, "ConnectionFailed", "Failed to connect to Git provider")
+		if gitConnected {
+			r.setCondition(atelier, ConditionTypeGitProviderConnected, metav1.ConditionTrue, "Connected", "Git provider connection successful")
+		} else {
+			r.setCondition(atelier, ConditionTypeGitProviderConnected, metav1.ConditionFalse, "ConnectionFailed", "Failed to connect to Git provider")
+		}
 	}
 
 	// Check ArgoCD connectivity if enabled
@@ -148,7 +153,7 @@ func (r *AtelierReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	logger.Info("Atelier reconciled",
 		"prometheusConnected", prometheusConnected,
-		"gitConnected", gitConnected,
+		"gitConnected", atelier.Status.GitProviderConnected,
 		"argoCDConnected", atelier.Status.ArgoCDConnected,
 		"managedTailorings", atelier.Status.ManagedTailorings)
 
@@ -221,41 +226,24 @@ func (r *AtelierReconciler) checkPrometheusConnection(ctx context.Context, ateli
 func (r *AtelierReconciler) checkGitProviderConnection(ctx context.Context, atelier *autoscalingv1alpha1.Atelier) bool {
 	logger := log.FromContext(ctx)
 
-	// Get credentials
-	secret, err := getCredentialSecret(ctx, r.Client, r.ControllerNamespace, atelier.Spec.GitProvider.SecretRef)
+	cfg, err := loadGitHubConfig(ctx, r.Client, atelier, r.ControllerNamespace)
 	if err != nil {
-		logger.Error(err, "Failed to get Git provider secret")
+		logger.Error(err, "Failed to load Git provider credentials")
 		return false
 	}
 
-	token, ok := secret.Data["token"]
-	if !ok {
-		logger.Error(fmt.Errorf("missing token"), "Git provider secret missing 'token' key")
+	provider, err := github.New(cfg)
+	if err != nil {
+		logger.Error(err, "Failed to create GitHub provider")
 		return false
 	}
 
-	switch atelier.Spec.GitProvider.Type {
-	case autoscalingv1alpha1.GitProviderGitHub:
-		provider, err := github.New(github.Config{
-			Token:   string(token),
-			BaseURL: atelier.Spec.GitProvider.BaseURL,
-		})
-		if err != nil {
-			logger.Error(err, "Failed to create GitHub provider")
-			return false
-		}
-
-		if err := provider.CheckConnection(ctx); err != nil {
-			logger.Error(err, "GitHub connection check failed")
-			return false
-		}
-
-		return true
-
-	default:
-		logger.Error(fmt.Errorf("unsupported provider"), "Unsupported Git provider", "type", atelier.Spec.GitProvider.Type)
+	if err := provider.CheckConnection(ctx); err != nil {
+		logger.Error(err, "GitHub connection check failed")
 		return false
 	}
+
+	return true
 }
 
 // checkArgoCDConnection tests the ArgoCD connection.

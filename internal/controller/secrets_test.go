@@ -151,14 +151,13 @@ func TestAtelierReconcile_SecretNamespaceRestriction(t *testing.T) {
 			atelier:        atelier("sartor", ""),
 			wantValid:      metav1.ConditionTrue,
 			wantPromReason: "ConnectionFailed",
-			wantGets:       []types.NamespacedName{{Namespace: "sartor", Name: "creds"}, {Namespace: "sartor", Name: "creds"}},
+			wantGets:       []types.NamespacedName{{Namespace: "sartor", Name: "creds"}},
 		},
 		{
 			name:           "Prometheus ref in another namespace is rejected without reading it",
 			atelier:        atelier("kube-system", "sartor"),
 			wantValid:      metav1.ConditionFalse,
 			wantPromReason: ReasonSecretNamespaceNotAllowed,
-			wantGets:       []types.NamespacedName{{Namespace: "sartor", Name: "creds"}},
 		},
 		{
 			name:           "both refs elsewhere: no Secret is read",

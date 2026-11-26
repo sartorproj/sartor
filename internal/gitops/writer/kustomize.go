@@ -145,18 +145,30 @@ func (w *KustomizeWriter) GeneratePatch(target PatchTarget, updates []ResourceUp
 
 // UpdatePatch updates an existing Kustomize patch with new resource values.
 func (w *KustomizeWriter) UpdatePatch(content []byte, updates []ResourceUpdate) ([]byte, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal(content, &root); err != nil {
+	return w.UpdatePatchFor(content, ManifestTarget{}, updates)
+}
+
+// UpdatePatchFor updates the strategic merge patch for target with new resource values.
+// Containers missing from the patch are appended (strategic merge matches them by name).
+func (w *KustomizeWriter) UpdatePatchFor(content []byte, target ManifestTarget, updates []ResourceUpdate) ([]byte, error) {
+	f, err := parseYAMLFile(content)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
 
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, fmt.Errorf("invalid YAML document")
+	var doc *yaml.Node
+	for i := range f.docs {
+		m, err := f.rootMapping(i)
+		if err != nil {
+			return nil, err
+		}
+		if documentMatches(m, target) {
+			doc = m
+			break
+		}
 	}
-
-	doc := root.Content[0]
-	if doc.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("expected mapping node at document root")
+	if doc == nil {
+		return nil, fmt.Errorf("%s %q not found in patch", target.Kind, target.Name)
 	}
 
 	// Navigate to spec.template.spec.containers
@@ -182,23 +194,16 @@ func (w *KustomizeWriter) UpdatePatch(content []byte, updates []ResourceUpdate) 
 
 	// Update each container
 	for _, update := range updates {
-		if err := updateContainerInPatch(containers, update); err != nil {
+		if err := updateContainerInPatch(f, containers, update); err != nil {
 			return nil, fmt.Errorf("failed to update container %s: %w", update.ContainerName, err)
 		}
 	}
 
-	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(&root); err != nil {
-		return nil, fmt.Errorf("failed to encode patch: %w", err)
-	}
-
-	return buf.Bytes(), nil
+	return f.render()
 }
 
 // updateContainerInPatch updates a container's resources in the patch.
-func updateContainerInPatch(containers *yaml.Node, update ResourceUpdate) error {
+func updateContainerInPatch(f *yamlFile, containers *yaml.Node, update ResourceUpdate) error {
 	if containers.Kind != yaml.SequenceNode {
 		return fmt.Errorf("containers is not a sequence")
 	}
@@ -219,49 +224,23 @@ func updateContainerInPatch(containers *yaml.Node, update ResourceUpdate) error 
 
 	// If container not found, add it
 	if containerNode == nil {
+		f.structural = true
 		containerNode = &yaml.Node{
 			Kind: yaml.MappingNode,
+			Tag:  tagMap,
 			Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "name"},
-				{Kind: yaml.ScalarNode, Value: update.ContainerName},
+				{Kind: yaml.ScalarNode, Tag: tagStr, Value: "name"},
+				{Kind: yaml.ScalarNode, Tag: tagStr, Value: update.ContainerName},
 			},
 		}
 		containers.Content = append(containers.Content, containerNode)
 	}
 
-	// Find or create resources node
-	resourcesIdx := findKeyIndex(containerNode, resourcesKey)
-	var resources *yaml.Node
-
-	if resourcesIdx == -1 {
-		keyNode := &yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: resourcesKey,
-		}
-		resources = &yaml.Node{
-			Kind:    yaml.MappingNode,
-			Content: []*yaml.Node{},
-		}
-		containerNode.Content = append(containerNode.Content, keyNode, resources)
-	} else {
-		resources = containerNode.Content[resourcesIdx+1]
+	resources, err := f.ensureMapping(containerNode, resourcesKey)
+	if err != nil {
+		return err
 	}
-
-	// Update requests
-	if update.Requests != nil {
-		if err := updateResourceSection(resources, "requests", update.Requests); err != nil {
-			return err
-		}
-	}
-
-	// Update limits
-	if update.Limits != nil {
-		if err := updateResourceSection(resources, "limits", update.Limits); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return updateResources(f, resources, update)
 }
 
 // JSONPatch represents a JSON Patch operation (RFC 6902).
