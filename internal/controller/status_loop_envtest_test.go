@@ -39,8 +39,8 @@ import (
 
 // TestEnvtest_StatusWritesDoNotRetrigger runs the real Tailoring and Atelier
 // controllers against an API server and checks that their own status writes
-// do not cause further analyses or connectivity checks, while a spec change
-// does trigger a new analysis.
+// do not cause further analyses or connectivity checks, and that a spec change
+// does not query the backend before the next scheduled analysis.
 func TestEnvtest_StatusWritesDoNotRetrigger(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("KUBEBUILDER_ASSETS not set; envtest binaries unavailable")
@@ -79,7 +79,10 @@ func TestEnvtest_StatusWritesDoNotRetrigger(t *testing.T) {
 		clock = clock.Add(time.Minute)
 		return clock
 	}
-	if err := (&TailoringReconciler{Client: mgr.GetClient(), Scheme: s, AnalysisInterval: 24 * time.Hour, now: advancingClock}).SetupWithManager(mgr); err != nil {
+	if err := (&TailoringReconciler{
+		Client: mgr.GetClient(), Scheme: s, AnalysisInterval: 24 * time.Hour, now: advancingClock,
+		jitter: func(*autoscalingv1alpha1.Tailoring) float64 { return 0 },
+	}).SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
 	}
 	if err := (&AtelierReconciler{Client: mgr.GetClient(), Scheme: s, ControllerNamespace: "sartor"}).SetupWithManager(mgr); err != nil {
@@ -153,10 +156,18 @@ func TestEnvtest_StatusWritesDoNotRetrigger(t *testing.T) {
 	if err := c.Update(ctx, again); err != nil {
 		t.Fatal(err)
 	}
-	waitFor("re-analysis after spec change", func(tl *autoscalingv1alpha1.Tailoring) bool {
-		return tl.Generation == first.Generation+1 && tl.Status.ObservedGeneration == tl.Generation
+	edited := waitFor("spec change", func(tl *autoscalingv1alpha1.Tailoring) bool {
+		return tl.Generation == first.Generation+1
 	})
-	if calls.Load() <= settled {
-		t.Fatal("spec change did not query the backend")
+	// Spec changes are picked up by the next scheduled analysis, not right away.
+	time.Sleep(3 * time.Second)
+	if got := calls.Load(); got != settled {
+		t.Fatalf("spec change queried the backend: %d requests, want %d", got, settled)
+	}
+	if err := c.Get(ctx, key, edited); err != nil {
+		t.Fatal(err)
+	}
+	if edited.Status.ObservedGeneration != first.Generation {
+		t.Fatalf("observedGeneration = %d, want %d until the next analysis", edited.Status.ObservedGeneration, first.Generation)
 	}
 }

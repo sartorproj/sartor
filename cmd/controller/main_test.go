@@ -23,6 +23,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	"github.com/sartorproj/sartor/internal/controller"
 )
 
 // recordingManager records the runnables (controllers) added to it.
@@ -81,5 +83,29 @@ func TestSetupOOMPatching(t *testing.T) {
 				t.Fatalf("added %d runnables, want %d", len(rec.added), tt.wantAdded)
 			}
 		})
+	}
+}
+
+func TestValidateWorkloadSource(t *testing.T) {
+	tests := []struct {
+		value   string
+		oom     bool
+		want    controller.WorkloadSource
+		wantErr bool
+	}{
+		{value: "kubernetes", want: controller.WorkloadSourceKubernetes},
+		{value: "kubernetes", oom: true, want: controller.WorkloadSourceKubernetes},
+		{value: "metrics", want: controller.WorkloadSourceMetrics},
+		{value: "metrics", oom: true, wantErr: true},
+		{value: "api", wantErr: true},
+	}
+	for _, tt := range tests {
+		got, err := validateWorkloadSource(tt.value, tt.oom)
+		if (err != nil) != tt.wantErr {
+			t.Fatalf("validateWorkloadSource(%q, %v) error = %v, wantErr %v", tt.value, tt.oom, err, tt.wantErr)
+		}
+		if got != tt.want {
+			t.Fatalf("validateWorkloadSource(%q, %v) = %q, want %q", tt.value, tt.oom, got, tt.want)
+		}
 	}
 }
