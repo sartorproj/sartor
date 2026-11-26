@@ -74,7 +74,7 @@ func NewPercentileStrategy() *PercentileStrategy {
 
 // Name returns the strategy name.
 func (s *PercentileStrategy) Name() string {
-	return "percentile"
+	return StrategyNamePercentile
 }
 
 // Calculate computes recommendations using P95 for requests and P99 for limits.
@@ -145,7 +145,7 @@ func (s *PercentileStrategy) calculateForContainer(
 ) Recommendation {
 	rec := Recommendation{
 		ContainerName: metrics.ContainerName,
-		Method:        "percentile",
+		Method:        StrategyNamePercentile,
 		Confidence:    0.8, // Default confidence for percentile method
 		Metadata:      make(map[string]interface{}),
 	}
@@ -375,7 +375,7 @@ func (s *PercentileStrategy) GetDefaultFitProfileSpec() FitProfileSpec {
 	}`), &paramsSchema)
 
 	return FitProfileSpec{
-		Strategy:          "percentile",
+		Strategy:          StrategyNamePercentile,
 		DisplayName:       "Percentile-based Optimization",
 		Description:       "Uses P95 for requests and P99 for limits with configurable buffers",
 		ParametersSchema:  paramsSchema,

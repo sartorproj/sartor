@@ -20,15 +20,18 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -64,6 +67,9 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var enableOOMPatching bool
+	var enableGitWriteBack bool
+	var analysisInterval time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -81,6 +87,13 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&enableOOMPatching, "enable-oom-patching", false,
+		"If set, watch pods for OOMKilled containers and raise the memory limit of workloads "+
+			"targeted by a non-paused Tailoring. Requires update/patch on deployments, statefulsets and daemonsets.")
+	flag.BoolVar(&enableGitWriteBack, "enable-git-writeback", false,
+		"If set, write recommendations back to Git and open pull requests. When unset the controller never touches Git.")
+	flag.DurationVar(&analysisInterval, "analysis-interval", controller.DefaultAnalysisInterval,
+		"Minimum time between analyses of a Tailoring whose spec has not changed.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -88,6 +101,16 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if analysisInterval <= 0 {
+		setupLog.Error(nil, "--analysis-interval must be positive", "value", analysisInterval)
+		os.Exit(1)
+	}
+
+	controllerNamespace := controller.ResolveControllerNamespace()
+	if controllerNamespace == "" {
+		setupLog.Info("Controller namespace is unknown; credential Secrets cannot be read. Set " + controller.PodNamespaceEnv)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -158,6 +181,7 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
+		Client:                 managerClientOptions(),
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -181,31 +205,25 @@ func main() {
 	}
 
 	if err := (&controller.TailoringReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		AnalysisInterval:    analysisInterval,
+		ControllerNamespace: controllerNamespace,
+		EnableGitWriteBack:  enableGitWriteBack,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Tailoring")
 		os.Exit(1)
 	}
 	if err := (&controller.AtelierReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		ControllerNamespace: controllerNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Atelier")
 		os.Exit(1)
 	}
 
-	// Setup OOM Interceptor
-	oomInterceptor := oom.NewInterceptor(mgr.GetClient(), oom.InterceptorConfig{
-		MemoryIncreasePercent: 20,
-		Enabled:               true,
-	})
-
-	if err := (&controller.OOMController{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		Interceptor: oomInterceptor,
-	}).SetupWithManager(mgr); err != nil {
+	if err := setupOOMPatching(mgr, enableOOMPatching); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OOM")
 		os.Exit(1)
 	}
@@ -238,5 +256,32 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+// setupOOMPatching registers the OOM controller only when enabled, so with
+// OOM patching off there is no Pod watch and no workload writes at all.
+func setupOOMPatching(mgr ctrl.Manager, enabled bool) error {
+	if !enabled {
+		setupLog.Info("OOM patching disabled (--enable-oom-patching=false); not watching pods")
+		return nil
+	}
+	setupLog.Info("OOM patching enabled; only workloads with a non-paused Tailoring are patched")
+	return (&controller.OOMController{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Interceptor: oom.NewInterceptor(mgr.GetClient(), oom.InterceptorConfig{
+			MemoryIncreasePercent: oom.DefaultMemoryIncrease,
+			Enabled:               true,
+		}),
+	}).SetupWithManager(mgr)
+}
+
+// managerClientOptions configures the manager's client. Secrets are read
+// directly from the API server: a cached Get would start a cluster-wide
+// Secret informer that needs list/watch on all Secrets.
+func managerClientOptions() client.Options {
+	return client.Options{
+		Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}},
 	}
 }
