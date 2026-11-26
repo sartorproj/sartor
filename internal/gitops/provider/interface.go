@@ -18,6 +18,15 @@ package provider
 
 import (
 	"context"
+	"errors"
+	"time"
+)
+
+var (
+	// ErrNotFound is returned (wrapped) when a file, branch or pull request does not exist.
+	ErrNotFound = errors.New("not found")
+	// ErrAlreadyExists is returned (wrapped) when an open pull request already exists for a branch.
+	ErrAlreadyExists = errors.New("already exists")
 )
 
 // PullRequest represents a Pull Request/Merge Request.
@@ -34,6 +43,14 @@ type PullRequest struct {
 	Labels []string
 	// IsMerged indicates if the PR has been merged.
 	IsMerged bool
+	// MergedAt is when the PR was merged.
+	MergedAt *time.Time
+	// HeadBranch is the source branch.
+	HeadBranch string
+	// BaseBranch is the target branch.
+	BaseBranch string
+	// LabelError is set when the PR was created but its labels could not be added.
+	LabelError error
 }
 
 // CreatePRRequest contains the parameters for creating a PR.
@@ -81,10 +98,14 @@ type Provider interface {
 	CheckConnection(ctx context.Context) error
 
 	// GetFileContent retrieves the content of a file from a repository.
+	// Missing files return an error wrapping ErrNotFound.
 	GetFileContent(ctx context.Context, repository, path, ref string) ([]byte, error)
 
 	// CreateBranch creates a new branch from the given base.
 	CreateBranch(ctx context.Context, repository, branchName, baseBranch string) error
+
+	// ResetBranch points branchName at the head of baseBranch, creating it if needed.
+	ResetBranch(ctx context.Context, repository, branchName, baseBranch string) error
 
 	// BranchExists checks if a branch exists.
 	BranchExists(ctx context.Context, repository, branchName string) (bool, error)
@@ -93,7 +114,14 @@ type Provider interface {
 	Commit(ctx context.Context, req CommitRequest) (sha string, err error)
 
 	// CreatePullRequest creates a new pull request.
+	// If one is already open for the head branch, the error wraps ErrAlreadyExists.
 	CreatePullRequest(ctx context.Context, req CreatePRRequest) (*PullRequest, error)
+
+	// UpdatePullRequest updates the title and body of an existing pull request.
+	UpdatePullRequest(ctx context.Context, repository string, number int, title, body string) (*PullRequest, error)
+
+	// FindOpenPullRequest returns the open pull request from headBranch into baseBranch, or nil.
+	FindOpenPullRequest(ctx context.Context, repository, headBranch, baseBranch string) (*PullRequest, error)
 
 	// GetPullRequest retrieves a pull request by number.
 	GetPullRequest(ctx context.Context, repository string, number int) (*PullRequest, error)
