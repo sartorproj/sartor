@@ -232,6 +232,16 @@ func renderChanges(ctx context.Context, p provider.Provider, req Request, ref st
 		updated, r.autoscalers, r.skipped = res.Content, res.Autoscalers, res.Skipped
 
 	case autoscalingv1alpha1.WriteBackTypeHelm:
+		if req.LiveFromPods && len(req.Updates) > 1 {
+			// helmValuePath holds one container's values; with pod-level values
+			// an injected sidecar could otherwise be written there.
+			names := make([]string, 0, len(req.Updates))
+			for _, u := range req.Updates {
+				names = append(names, u.ContainerName)
+			}
+			return nil, fmt.Errorf("%s: helm write-back writes one container's values but the pods run %s; "+
+				"list the other containers in spec.excludeContainers", req.Path, strings.Join(names, ", "))
+		}
 		updated, err = writer.NewHelmWriter().UpdateValues(content, req.Updates, req.HelmValuePath)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", req.Path, err)

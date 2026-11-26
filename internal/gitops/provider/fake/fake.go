@@ -30,6 +30,7 @@ const stateOpen = "open"
 type pullRequest struct {
 	provider.PullRequest
 	head, base string
+	body       string
 }
 
 // Provider is an in-memory provider.Provider that records every call.
@@ -88,6 +89,18 @@ func (p *Provider) PullRequests() []provider.PullRequest {
 		out = append(out, pr.PullRequest)
 	}
 	return out
+}
+
+// Body returns the description of PR number, or "" if there is none.
+func (p *Provider) Body(number int) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, pr := range p.prs {
+		if pr.Number == number {
+			return pr.body
+		}
+	}
+	return ""
 }
 
 // SetPRState changes a PR's state ("open", "closed") and merged flag.
@@ -215,6 +228,7 @@ func (p *Provider) CreatePullRequest(_ context.Context, req provider.CreatePRReq
 		},
 		head: req.HeadBranch,
 		base: req.BaseBranch,
+		body: req.Body,
 	}
 	p.prs = append(p.prs, pr)
 	if p.CreatePRErr != nil {
@@ -225,13 +239,13 @@ func (p *Provider) CreatePullRequest(_ context.Context, req provider.CreatePRReq
 }
 
 // UpdatePullRequest implements provider.Provider.
-func (p *Provider) UpdatePullRequest(_ context.Context, _ string, number int, title, _ string) (*provider.PullRequest, error) {
+func (p *Provider) UpdatePullRequest(_ context.Context, _ string, number int, title, body string) (*provider.PullRequest, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.record(fmt.Sprintf("UpdatePullRequest %d", number))
 	for _, pr := range p.prs {
 		if pr.Number == number {
-			pr.Title = title
+			pr.Title, pr.body = title, body
 			c := pr.PullRequest
 			return &c, nil
 		}

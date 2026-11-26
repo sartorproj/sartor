@@ -196,89 +196,128 @@ type stateKey struct {
 	container, source, resource string
 }
 
-func parseSnapshot(vector model.Vector) *WorkloadState {
-	st := &WorkloadState{Containers: map[string]ContainerResources{}}
-	maxV, minV, count := map[stateKey]float64{}, map[stateKey]float64{}, map[stateKey]float64{}
-	quotas := map[string]*Quota{}
-	hpas := map[string]*HPAInfo{}
-	vpas := map[string]*VPAInfo{}
-	oom := map[string]bool{}
+// snapshotParser accumulates the tagged sub-results of a snapshot query.
+type snapshotParser struct {
+	st                *WorkloadState
+	maxV, minV, count map[stateKey]float64
+	quotas            map[string]*Quota
+	hpas              map[string]*HPAInfo
+	vpas              map[string]*VPAInfo
+	oom               map[string]bool
+}
 
+func parseSnapshot(vector model.Vector) *WorkloadState {
+	p := &snapshotParser{
+		st:     &WorkloadState{Containers: map[string]ContainerResources{}},
+		maxV:   map[stateKey]float64{},
+		minV:   map[stateKey]float64{},
+		count:  map[stateKey]float64{},
+		quotas: map[string]*Quota{},
+		hpas:   map[string]*HPAInfo{},
+		vpas:   map[string]*VPAInfo{},
+		oom:    map[string]bool{},
+	}
 	for _, s := range vector {
 		v := float64(s.Value)
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			continue
 		}
-		m := s.Metric
-		switch string(m[sourceLabel]) {
-		case srcExists:
-			st.Exists = true
-		case srcPods:
-			st.Pods = int(v)
-		case srcInfo, srcRequests, srcLimits:
-			k := stateKey{string(m["container"]), string(m[sourceLabel]), string(m["resource"])}
-			if k.container == "" {
-				continue
-			}
-			switch string(m[aggLabel]) {
-			case "max":
-				maxV[k] = v
-			case "min":
-				minV[k] = v
-			case "count":
-				count[k] = v
-			}
-		case srcOOM:
-			if c := string(m["container"]); c != "" && v > 0 {
-				oom[c] = true
-			}
-		case srcQuota:
-			name := string(m["resourcequota"])
-			q := quotas[name]
-			if q == nil {
-				q = &Quota{Name: name}
-				quotas[name] = q
-			}
-			switch string(m["resource"]) {
-			case "limits.cpu":
-				q.CPULimit = resource.NewMilliQuantity(int64(math.Round(v*1000)), resource.DecimalSI)
-			case "limits.memory":
-				q.MemoryLimit = resource.NewQuantity(int64(v), resource.BinarySI)
-			}
-		case srcHPA, srcHPATarget, srcKEDA:
-			name := string(m["horizontalpodautoscaler"])
-			if name == "" {
-				continue
-			}
-			h := hpas[name]
-			if h == nil {
-				h = &HPAInfo{Name: name}
-				hpas[name] = h
-			}
-			switch string(m[sourceLabel]) {
-			case srcHPATarget:
-				h.UtilizationResources = appendUnique(h.UtilizationResources, string(m["metric_name"]))
-			case srcKEDA:
-				h.ScaledObject = string(m["label_scaledobject_keda_sh_name"])
-			}
-		case srcVPA, srcVPAMode:
-			name := string(m["verticalpodautoscaler"])
-			if name == "" {
-				continue
-			}
-			vpa := vpas[name]
-			if vpa == nil {
-				vpa = &VPAInfo{Name: name}
-				vpas[name] = vpa
-			}
-			if mode := string(m["update_mode"]); mode != "" {
-				vpa.UpdateMode = mode
-			}
-		}
+		p.add(s.Metric, v)
 	}
+	return p.finish()
+}
 
+func (p *snapshotParser) add(m model.Metric, v float64) {
+	switch source := string(m[sourceLabel]); source {
+	case srcExists:
+		p.st.Exists = true
+	case srcPods:
+		p.st.Pods = int(v)
+	case srcInfo, srcRequests, srcLimits:
+		p.addContainerValue(m, source, v)
+	case srcOOM:
+		if c := string(m["container"]); c != "" && v > 0 {
+			p.oom[c] = true
+		}
+	case srcQuota:
+		p.addQuota(m, v)
+	case srcHPA, srcHPATarget, srcKEDA:
+		p.addHPA(m, source)
+	case srcVPA, srcVPAMode:
+		p.addVPA(m)
+	}
+}
+
+func (p *snapshotParser) addContainerValue(m model.Metric, source string, v float64) {
+	k := stateKey{string(m["container"]), source, string(m["resource"])}
+	if k.container == "" {
+		return
+	}
+	switch string(m[aggLabel]) {
+	case "max":
+		p.maxV[k] = v
+	case "min":
+		p.minV[k] = v
+	case "count":
+		p.count[k] = v
+	}
+}
+
+func (p *snapshotParser) addQuota(m model.Metric, v float64) {
+	name := string(m["resourcequota"])
+	q := p.quotas[name]
+	if q == nil {
+		q = &Quota{Name: name}
+		p.quotas[name] = q
+	}
+	switch string(m["resource"]) {
+	case "limits.cpu":
+		q.CPULimit = resource.NewMilliQuantity(int64(math.Round(v*1000)), resource.DecimalSI)
+	case "limits.memory":
+		q.MemoryLimit = resource.NewQuantity(int64(v), resource.BinarySI)
+	}
+}
+
+func (p *snapshotParser) addHPA(m model.Metric, source string) {
+	name := string(m["horizontalpodautoscaler"])
+	if name == "" {
+		return
+	}
+	h := p.hpas[name]
+	if h == nil {
+		h = &HPAInfo{Name: name}
+		p.hpas[name] = h
+	}
+	switch source {
+	case srcHPATarget:
+		h.UtilizationResources = appendUnique(h.UtilizationResources, string(m["metric_name"]))
+	case srcKEDA:
+		h.ScaledObject = string(m["label_scaledobject_keda_sh_name"])
+	}
+}
+
+func (p *snapshotParser) addVPA(m model.Metric) {
+	name := string(m["verticalpodautoscaler"])
+	if name == "" {
+		return
+	}
+	vpa := p.vpas[name]
+	if vpa == nil {
+		vpa = &VPAInfo{Name: name}
+		p.vpas[name] = vpa
+	}
+	if mode := string(m["update_mode"]); mode != "" {
+		vpa.UpdateMode = mode
+	}
+}
+
+// finish builds the containers and flags those whose pods disagree: a
+// container missing on some pods, a value that differs between pods
+// (max != min), or a value set on some pods only.
+func (p *snapshotParser) finish() *WorkloadState {
+	st := p.st
 	disagree := map[string]bool{}
-	for k, n := range count {
+	for k, n := range p.count {
 		if k.source != srcInfo {
 			continue
 		}
@@ -287,53 +326,53 @@ func parseSnapshot(vector model.Vector) *WorkloadState {
 			disagree[k.container] = true
 		}
 	}
-	for k, mx := range maxV {
+	for k, mx := range p.maxV {
 		cr, present := st.Containers[k.container]
 		if !present || k.source == srcInfo {
 			continue
 		}
-		if mn, ok := minV[k]; !ok || mn != mx {
+		if mn, ok := p.minV[k]; !ok || mn != mx {
 			disagree[k.container] = true
 		}
-		if count[k] != count[stateKey{k.container, srcInfo, ""}] {
-			// Set on some pods but not on others.
+		if p.count[k] != p.count[stateKey{k.container, srcInfo, ""}] {
 			disagree[k.container] = true
 		}
-		var q *resource.Quantity
-		switch k.resource {
-		case "cpu":
-			q = resource.NewMilliQuantity(int64(math.Round(mx*1000)), resource.DecimalSI)
-		case "memory":
-			q = resource.NewQuantity(int64(math.Round(mx)), resource.BinarySI)
-		default:
-			continue
+		if setValue(&cr, k, mx) {
+			st.Containers[k.container] = cr
 		}
-		target := &cr.Requests
-		if k.source == srcLimits {
-			target = &cr.Limits
-		}
-		if k.resource == "cpu" {
-			target.CPU = q
-		} else {
-			target.Memory = q
-		}
-		st.Containers[k.container] = cr
 	}
 	st.Disagreeing = sortedKeys(disagree)
-	st.OOMKilled = sortedKeys(oom)
+	st.OOMKilled = sortedKeys(p.oom)
 
-	if names := sortedKeys(quotas); len(names) > 0 {
-		st.Quota = quotas[names[0]]
+	if names := sortedKeys(p.quotas); len(names) > 0 {
+		st.Quota = p.quotas[names[0]]
 	}
-	for _, name := range sortedKeys(hpas) {
-		h := hpas[name]
+	for _, name := range sortedKeys(p.hpas) {
+		h := p.hpas[name]
 		sort.Strings(h.UtilizationResources)
 		st.HPAs = append(st.HPAs, *h)
 	}
-	for _, name := range sortedKeys(vpas) {
-		st.VPAs = append(st.VPAs, *vpas[name])
+	for _, name := range sortedKeys(p.vpas) {
+		st.VPAs = append(st.VPAs, *p.vpas[name])
 	}
 	return st
+}
+
+// setValue stores a request or limit value (cores or bytes) in cr.
+func setValue(cr *ContainerResources, k stateKey, v float64) bool {
+	target := &cr.Requests
+	if k.source == srcLimits {
+		target = &cr.Limits
+	}
+	switch k.resource {
+	case "cpu":
+		target.CPU = resource.NewMilliQuantity(int64(math.Round(v*1000)), resource.DecimalSI)
+	case "memory":
+		target.Memory = resource.NewQuantity(int64(math.Round(v)), resource.BinarySI)
+	default:
+		return false
+	}
+	return true
 }
 
 func appendUnique(s []string, v string) []string {

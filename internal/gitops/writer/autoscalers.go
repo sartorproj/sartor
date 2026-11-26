@@ -45,6 +45,10 @@ type AutoscalerNote struct {
 	Name string
 	// Adjusted is true when the autoscaler document was changed.
 	Adjusted bool
+	// KeepsScalingPoint is true for a ScaledObject whose cpu/memory
+	// Utilization triggers all follow the written requests (changed now or
+	// already consistent), so its HPA's scaling point does not move.
+	KeepsScalingPoint bool
 	// Details lists the individual changes, or why nothing was changed.
 	Details []string
 }
@@ -279,6 +283,7 @@ func adjustScaledObject(f *yamlFile, spec *yaml.Node, name string, before, after
 		note.Details = append(note.Details, "no triggers")
 		return note
 	}
+	tracked, untracked := 0, 0
 	for i, t := range triggers.Content {
 		typ := scalarValue(findKey(t, "type"))
 		if typ != resourceCPU && typ != resourceMemory {
@@ -296,20 +301,24 @@ func adjustScaledObject(f *yamlFile, spec *yaml.Node, name string, before, after
 			note.Details = append(note.Details, label+": AverageValue is an absolute target, left unchanged")
 			continue
 		default:
+			untracked++
 			note.Details = append(note.Details, fmt.Sprintf("%s: metric type %q, left unchanged", label, metricType))
 			continue
 		}
 		valueNode := findKey(meta, "value")
 		value, err := strconv.ParseFloat(strings.TrimSpace(scalarValue(valueNode)), 64)
 		if err != nil || value <= 0 {
+			untracked++
 			note.Details = append(note.Details, label+": no numeric value, left unchanged")
 			continue
 		}
 		oldReq, newReq, why := utilizationBase(before, after, scalarValue(findKey(meta, "containerName")), typ)
 		if why != "" {
+			untracked++
 			note.Details = append(note.Details, label+": "+why+", left unchanged")
 			continue
 		}
+		tracked++
 		if oldReq == newReq {
 			continue
 		}
@@ -322,6 +331,7 @@ func adjustScaledObject(f *yamlFile, spec *yaml.Node, name string, before, after
 		note.Adjusted = true
 		note.Details = append(note.Details, fmt.Sprintf("%s: Utilization %s%% -> %s%%", label, scalarValue(valueNode), newValue))
 	}
+	note.KeepsScalingPoint = tracked > 0 && untracked == 0
 	if len(note.Details) == 0 {
 		note.Details = append(note.Details, "no cpu/memory Utilization trigger depends on the changed requests")
 	}

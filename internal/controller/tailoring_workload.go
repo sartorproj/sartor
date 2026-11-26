@@ -357,6 +357,21 @@ func (r *TailoringReconciler) setWorkloadStatus(t *autoscalingv1alpha1.Tailoring
 	}
 }
 
+// assumedKeptBy returns the ScaledObjects whose triggers a raw write-back
+// rescales with the requests, for analyses without a write-back result.
+func assumedKeptBy(t *autoscalingv1alpha1.Tailoring) map[string]bool {
+	if t.Spec.WriteBack.Type != autoscalingv1alpha1.WriteBackTypeRaw {
+		return nil
+	}
+	kept := map[string]bool{}
+	for _, a := range t.Status.Autoscalers {
+		if a.Kind == autoscalingv1alpha1.AutoscalerKindScaledObject {
+			kept[a.Name] = true
+		}
+	}
+	return kept
+}
+
 // setScalingPointCondition flags HPAs whose Utilization targets are relative
 // to requests the recommendation changes. keptBy names ScaledObjects whose
 // triggers were rescaled in Git, so their HPAs keep the scaling point.

@@ -242,7 +242,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	applyOOMFloor(recommendations, currentResources, view.oomKilled)
-	r.setScalingPointCondition(tailoring, recommendations, currentResources, nil)
+	r.setScalingPointCondition(tailoring, recommendations, currentResources, assumedKeptBy(tailoring))
 
 	// Convert strategy recommendations to old format for compatibility
 	legacyRecommendations := convertStrategyRecommendations(recommendations)
@@ -289,7 +289,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if notes := r.reconcileGitOps(ctx, tailoring, atelier, currentResources, logger); len(notes) > 0 {
 		keptBy := map[string]bool{}
 		for _, n := range notes {
-			if n.Kind == writer.KindScaledObject && n.Adjusted {
+			if n.Kind == writer.KindScaledObject && n.KeepsScalingPoint {
 				keptBy[n.Name] = true
 			}
 		}

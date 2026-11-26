@@ -654,7 +654,7 @@ func (h *Handler) DetectArgoCDApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	var workloads client.Client = h.client
+	workloads := h.client
 	if cluster != "" {
 		workloads = nil
 	}

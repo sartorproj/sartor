@@ -89,9 +89,9 @@ func autoscalingSection(req Request, r *rendered) string {
 		state := "left unchanged"
 		if n.Adjusted {
 			state = "adjusted"
-			if n.Kind == writer.KindScaledObject {
-				keptBy[n.Name] = true
-			}
+		}
+		if n.Kind == writer.KindScaledObject && n.KeepsScalingPoint {
+			keptBy[n.Name] = true
 		}
 		lines = append(lines, fmt.Sprintf("- %s `%s` (in `%s`): %s: %s.", n.Kind, n.Name, req.Path, state, strings.Join(n.Details, "; ")))
 	}
