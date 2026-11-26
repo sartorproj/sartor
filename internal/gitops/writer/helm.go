@@ -17,7 +17,6 @@ limitations under the License.
 package writer
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 
@@ -34,111 +33,53 @@ func NewHelmWriter() *HelmWriter {
 
 // UpdateValues updates the resource requests/limits in a Helm values.yaml file.
 // valuePath specifies the path to the resources section (e.g., "resources" or "deployment.resources").
+// A single resources block is shared by the workload, so only the first update is applied.
 func (w *HelmWriter) UpdateValues(content []byte, updates []ResourceUpdate, valuePath string) ([]byte, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal(content, &root); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	f, err := parseYAMLFile(content)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := f.rootMapping(0)
+	if err != nil {
+		return nil, err
 	}
 
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, fmt.Errorf("invalid YAML document")
-	}
-
-	doc := root.Content[0]
-	if doc.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("expected mapping node at document root")
-	}
-
-	// Parse the value path
 	pathParts := strings.Split(valuePath, ".")
 
-	// Navigate to the parent of the resources section
 	parentNode := doc
 	for i := 0; i < len(pathParts)-1; i++ {
 		parentNode = findKey(parentNode, pathParts[i])
-		if parentNode == nil {
+		if parentNode == nil || parentNode.Kind != yaml.MappingNode {
 			return nil, fmt.Errorf("path not found: %s", strings.Join(pathParts[:i+1], "."))
 		}
 	}
 
-	// Get or create the resources key
 	resourcesKey := pathParts[len(pathParts)-1]
-
-	// For Helm values, we update the global resources section
-	// The structure depends on the chart, but typically:
-	// resources:
-	//   requests:
-	//     cpu: "100m"
-	//     memory: "128Mi"
-	//   limits:
-	//     cpu: "200m"
-	//     memory: "256Mi"
-
-	resourcesIdx := findKeyIndex(parentNode, resourcesKey)
-	var resourcesNode *yaml.Node
-
-	if resourcesIdx == -1 {
-		// Create resources node
-		keyNode := &yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: resourcesKey,
-		}
-		resourcesNode = &yaml.Node{
-			Kind:    yaml.MappingNode,
-			Content: []*yaml.Node{},
-		}
-		parentNode.Content = append(parentNode.Content, keyNode, resourcesNode)
-	} else {
-		resourcesNode = parentNode.Content[resourcesIdx+1]
+	if len(updates) == 0 {
+		return f.render()
 	}
 
-	// For Helm, we typically have a single resources block (not per-container)
-	// If there are multiple containers, the chart usually uses different keys
-	// For now, we'll update the main resources block with the first container's values
-	if len(updates) > 0 {
-		update := updates[0]
-
-		// Update requests
-		if update.Requests != nil {
-			if err := updateResourceSection(resourcesNode, "requests", update.Requests); err != nil {
-				return nil, err
-			}
-		}
-
-		// Update limits
-		if update.Limits != nil {
-			if err := updateResourceSection(resourcesNode, "limits", update.Limits); err != nil {
-				return nil, err
-			}
-		}
+	resourcesNode, err := f.ensureMapping(parentNode, resourcesKey)
+	if err != nil {
+		return nil, fmt.Errorf("path %s: %w", valuePath, err)
+	}
+	if err := updateResources(f, resourcesNode, updates[0]); err != nil {
+		return nil, err
 	}
 
-	// Marshal back to YAML preserving formatting
-	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(&root); err != nil {
-		return nil, fmt.Errorf("failed to encode YAML: %w", err)
-	}
-
-	return buf.Bytes(), nil
+	return f.render()
 }
 
 // UpdateValuesMultiContainer updates resources for multiple containers in a Helm values.yaml.
 // containerPathMap maps container names to their value paths (e.g., {"app": "app.resources", "sidecar": "sidecar.resources"}).
 func (w *HelmWriter) UpdateValuesMultiContainer(content []byte, updates []ResourceUpdate, containerPathMap map[string]string) ([]byte, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal(content, &root); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	f, err := parseYAMLFile(content)
+	if err != nil {
+		return nil, err
 	}
-
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, fmt.Errorf("invalid YAML document")
-	}
-
-	doc := root.Content[0]
-	if doc.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("expected mapping node at document root")
+	doc, err := f.rootMapping(0)
+	if err != nil {
+		return nil, err
 	}
 
 	for _, update := range updates {
@@ -148,82 +89,40 @@ func (w *HelmWriter) UpdateValuesMultiContainer(content []byte, updates []Resour
 			continue
 		}
 
-		if err := w.updateAtPath(doc, valuePath, update); err != nil {
+		if err := w.updateAtPath(f, doc, valuePath, update); err != nil {
 			return nil, fmt.Errorf("failed to update container %s: %w", update.ContainerName, err)
 		}
 	}
 
-	// Marshal back to YAML preserving formatting
-	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(&root); err != nil {
-		return nil, fmt.Errorf("failed to encode YAML: %w", err)
-	}
-
-	return buf.Bytes(), nil
+	return f.render()
 }
 
 // updateAtPath updates resources at a specific path.
-func (w *HelmWriter) updateAtPath(doc *yaml.Node, valuePath string, update ResourceUpdate) error {
+func (w *HelmWriter) updateAtPath(f *yamlFile, doc *yaml.Node, valuePath string, update ResourceUpdate) error {
 	pathParts := strings.Split(valuePath, ".")
 
-	// Navigate to the target node, creating intermediate nodes as needed
 	currentNode := doc
 	for i, part := range pathParts {
-		idx := findKeyIndex(currentNode, part)
-		if idx == -1 {
-			// Create the node
-			keyNode := &yaml.Node{
-				Kind:  yaml.ScalarNode,
-				Value: part,
-			}
-			valueNode := &yaml.Node{
-				Kind:    yaml.MappingNode,
-				Content: []*yaml.Node{},
-			}
-			currentNode.Content = append(currentNode.Content, keyNode, valueNode)
-			currentNode = valueNode
-		} else {
-			currentNode = currentNode.Content[idx+1]
-			if currentNode.Kind != yaml.MappingNode {
-				return fmt.Errorf("expected mapping node at path %s", strings.Join(pathParts[:i+1], "."))
-			}
+		next, err := f.ensureMapping(currentNode, part)
+		if err != nil {
+			return fmt.Errorf("expected mapping node at path %s", strings.Join(pathParts[:i+1], "."))
 		}
+		currentNode = next
 	}
 
-	// Update requests
-	if update.Requests != nil {
-		if err := updateResourceSection(currentNode, "requests", update.Requests); err != nil {
-			return err
-		}
-	}
-
-	// Update limits
-	if update.Limits != nil {
-		if err := updateResourceSection(currentNode, "limits", update.Limits); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return updateResources(f, currentNode, update)
 }
 
 // DetectHelmStructure analyzes a values.yaml to detect the resources structure.
 // Returns a map of detected container names to their value paths.
 func (w *HelmWriter) DetectHelmStructure(content []byte) (map[string]string, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal(content, &root); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	f, err := parseYAMLFile(content)
+	if err != nil {
+		return nil, err
 	}
-
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, fmt.Errorf("invalid YAML document")
-	}
-
-	doc := root.Content[0]
-	if doc.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("expected mapping node at document root")
+	doc, err := f.rootMapping(0)
+	if err != nil {
+		return nil, err
 	}
 
 	result := make(map[string]string)

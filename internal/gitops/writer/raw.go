@@ -53,39 +53,87 @@ func NewRawWriter() *RawWriter {
 	return &RawWriter{}
 }
 
+// ManifestTarget selects the workload document to edit in a (multi-document) manifest.
+// Empty fields match any value.
+type ManifestTarget struct {
+	Kind string
+	Name string
+}
+
 // UpdateManifest updates the resource requests/limits in a Kubernetes manifest.
+// If the file contains several documents, the first one with pod template containers is edited.
 func (w *RawWriter) UpdateManifest(content []byte, updates []ResourceUpdate) ([]byte, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal(content, &root); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
-	}
+	return w.UpdateManifestFor(content, ManifestTarget{}, updates)
+}
 
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, fmt.Errorf("invalid YAML document")
-	}
-
-	// Navigate to spec.template.spec.containers
-	containers, err := findContainers(&root)
+// UpdateManifestFor updates the resource requests/limits of the workload matching target.
+// Only the changed scalar values are rewritten; comments and formatting are preserved.
+func (w *RawWriter) UpdateManifestFor(content []byte, target ManifestTarget, updates []ResourceUpdate) ([]byte, error) {
+	f, err := parseYAMLFile(content)
 	if err != nil {
 		return nil, err
 	}
 
-	// Apply updates to matching containers
+	containers, err := findTargetContainers(f, target)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, update := range updates {
-		if err := updateContainer(containers, update); err != nil {
+		if err := updateContainer(f, containers, update); err != nil {
 			return nil, fmt.Errorf("failed to update container %s: %w", update.ContainerName, err)
 		}
 	}
 
-	// Marshal back to YAML preserving formatting
-	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(&root); err != nil {
-		return nil, fmt.Errorf("failed to encode YAML: %w", err)
-	}
+	return f.render()
+}
 
-	return buf.Bytes(), nil
+// findTargetContainers returns the containers sequence of the document matching target.
+func findTargetContainers(f *yamlFile, target ManifestTarget) (*yaml.Node, error) {
+	var firstErr error
+	matched := false
+	for i := range f.docs {
+		doc, err := f.rootMapping(i)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !documentMatches(doc, target) {
+			continue
+		}
+		matched = true
+		containers, err := findContainers(f.docs[i])
+		if err == nil {
+			return containers, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if !matched && (target.Kind != "" || target.Name != "") {
+		return nil, fmt.Errorf("%s %q not found in manifest", target.Kind, target.Name)
+	}
+	return nil, firstErr
+}
+
+func documentMatches(doc *yaml.Node, target ManifestTarget) bool {
+	if target.Kind != "" {
+		if kind := findKey(doc, "kind"); kind == nil || kind.Value != target.Kind {
+			return false
+		}
+	}
+	if target.Name != "" {
+		metadata := findKey(doc, "metadata")
+		if metadata == nil {
+			return false
+		}
+		if name := findKey(metadata, "name"); name == nil || name.Value != target.Name {
+			return false
+		}
+	}
+	return true
 }
 
 // findContainers navigates the YAML tree to find the containers array.
@@ -130,7 +178,7 @@ func findContainers(root *yaml.Node) (*yaml.Node, error) {
 
 // findKey finds a key in a mapping node and returns its value node.
 func findKey(mapping *yaml.Node, key string) *yaml.Node {
-	if mapping.Kind != yaml.MappingNode {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
 		return nil
 	}
 
@@ -145,7 +193,7 @@ func findKey(mapping *yaml.Node, key string) *yaml.Node {
 
 // findKeyIndex finds a key in a mapping node and returns its index.
 func findKeyIndex(mapping *yaml.Node, key string) int {
-	if mapping.Kind != yaml.MappingNode {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
 		return -1
 	}
 
@@ -159,108 +207,58 @@ func findKeyIndex(mapping *yaml.Node, key string) int {
 }
 
 // updateContainer updates a single container's resources.
-func updateContainer(containers *yaml.Node, update ResourceUpdate) error {
+func updateContainer(f *yamlFile, containers *yaml.Node, update ResourceUpdate) error {
 	for _, container := range containers.Content {
 		if container.Kind != yaml.MappingNode {
 			continue
 		}
 
-		// Find container name
 		nameNode := findKey(container, "name")
 		if nameNode == nil || nameNode.Value != update.ContainerName {
 			continue
 		}
 
-		// Find or create resources node
-		resourcesIdx := findKeyIndex(container, resourcesKey)
-		var resources *yaml.Node
-
-		if resourcesIdx == -1 {
-			// Create resources node
-			keyNode := &yaml.Node{
-				Kind:  yaml.ScalarNode,
-				Value: resourcesKey,
-			}
-			resources = &yaml.Node{
-				Kind:    yaml.MappingNode,
-				Content: []*yaml.Node{},
-			}
-			container.Content = append(container.Content, keyNode, resources)
-		} else {
-			resources = container.Content[resourcesIdx+1]
+		resources, err := f.ensureMapping(container, resourcesKey)
+		if err != nil {
+			return err
 		}
-
-		// Update requests
-		if update.Requests != nil {
-			if err := updateResourceSection(resources, "requests", update.Requests); err != nil {
-				return err
-			}
-		}
-
-		// Update limits
-		if update.Limits != nil {
-			if err := updateResourceSection(resources, "limits", update.Limits); err != nil {
-				return err
-			}
-		}
-
-		return nil
+		return updateResources(f, resources, update)
 	}
 
 	return fmt.Errorf("container %s not found", update.ContainerName)
 }
 
-// updateResourceSection updates the requests or limits section.
-func updateResourceSection(resources *yaml.Node, sectionName string, values *ResourceValues) error {
-	sectionIdx := findKeyIndex(resources, sectionName)
-	var section *yaml.Node
-
-	if sectionIdx == -1 {
-		// Create section node
-		keyNode := &yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: sectionName,
+// updateResources writes the requests and limits of update into a resources mapping.
+func updateResources(f *yamlFile, resources *yaml.Node, update ResourceUpdate) error {
+	if update.Requests != nil {
+		if err := updateResourceSection(f, resources, "requests", update.Requests); err != nil {
+			return err
 		}
-		section = &yaml.Node{
-			Kind:    yaml.MappingNode,
-			Content: []*yaml.Node{},
+	}
+	if update.Limits != nil {
+		if err := updateResourceSection(f, resources, "limits", update.Limits); err != nil {
+			return err
 		}
-		resources.Content = append(resources.Content, keyNode, section)
-	} else {
-		section = resources.Content[sectionIdx+1]
 	}
-
-	// Update CPU
-	if values.CPU != nil {
-		updateScalarValue(section, "cpu", values.CPU.String())
-	}
-
-	// Update Memory
-	if values.Memory != nil {
-		updateScalarValue(section, "memory", values.Memory.String())
-	}
-
 	return nil
 }
 
-// updateScalarValue updates or creates a scalar value in a mapping.
-func updateScalarValue(mapping *yaml.Node, key, value string) {
-	idx := findKeyIndex(mapping, key)
-	if idx == -1 {
-		// Create new key-value pair
-		keyNode := &yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: key,
-		}
-		valueNode := &yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: value,
-		}
-		mapping.Content = append(mapping.Content, keyNode, valueNode)
-	} else {
-		// Update existing value
-		mapping.Content[idx+1].Value = value
+// updateResourceSection updates the requests or limits section.
+func updateResourceSection(f *yamlFile, resources *yaml.Node, sectionName string, values *ResourceValues) error {
+	if values.CPU == nil && values.Memory == nil {
+		return nil
 	}
+	section, err := f.ensureMapping(resources, sectionName)
+	if err != nil {
+		return err
+	}
+	if values.CPU != nil {
+		f.setScalar(section, "cpu", values.CPU.String())
+	}
+	if values.Memory != nil {
+		f.setScalar(section, "memory", values.Memory.String())
+	}
+	return nil
 }
 
 // PRDescriptionOptions holds options for generating PR descriptions.

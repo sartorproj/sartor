@@ -87,7 +87,7 @@ The `Tailoring` resource is namespace-scoped and defines per-workload optimizati
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `target` | TargetRef | Yes | Workload to optimize |
-| `intent` | Intent | Yes | Optimization profile (Eco/Balanced/Critical) |
+| `fitProfileRef` | FitProfileRef | Yes | FitProfile with the recommendation strategy and its parameters |
 | `writeBack` | WriteBackConfig | Yes | GitOps configuration |
 | `analysisWindow` | Duration | No | Time window for metrics (default from Atelier) |
 | `paused` | bool | No | Dry-run mode (no PRs created) |
@@ -104,17 +104,11 @@ target:
 
 ```yaml
 writeBack:
-  strategy: RawYAML  # RawYAML, HelmValues, KustomizePatch
+  type: raw  # raw, helm, kustomize
   repository: "org/repo"
   path: "apps/my-app/deployment.yaml"
   branch: "main"
 ```
-
-### Intent Values
-
-- `Eco`: Maximum cost savings (10-15% buffer)
-- `Balanced`: Balanced optimization (20-25% buffer)
-- `Critical`: Maximum reliability (30-50% buffer)
 
 ## Status Fields
 

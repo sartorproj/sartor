@@ -83,6 +83,9 @@ type TailoringReconciler struct {
 	// (--enable-git-writeback). When false the controller never touches git.
 	EnableGitWriteBack bool
 
+	// NewGitProvider creates the Git provider; defaults to DefaultGitProviderFactory.
+	NewGitProvider GitProviderFactory
+
 	// now returns the current time; overridable in tests.
 	now func() time.Time
 }
@@ -292,10 +295,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.updateStatusAndRequeue(ctx, tailoring, logger)
 	}
 
-	// TODO: Handle Git PR operations directly
-	// For now, just mark as ready - Git operations will be implemented in a future update
-	logger.Info("Recommendations calculated, Git operations not yet implemented")
-	r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "Ready", "Recommendations calculated")
+	r.reconcileGitOps(ctx, tailoring, atelier, currentResources, logger)
 	return r.updateStatusAndRequeue(ctx, tailoring, logger)
 }
 

@@ -30,7 +30,6 @@
 - 🧹 **Data Preprocessing**: Automatic imputation, outlier removal, and normalization
 - 🔄 **GitOps Integration**: Creates PRs for raw YAML, Helm, and Kustomize
 - 🚨 **OOM Protection** (opt-in): Raises memory limits after OOMKilled events for workloads with an active Tailoring
-- 🔗 **ArgoCD Support**: Auto-syncs ArgoCD applications after PR merge
 - 🛡️ **Safety Rails**: Configurable min/max limits to prevent over-optimization
 - ⏸️ **Dry-Run Mode**: Preview recommendations without creating PRs
 - 📈 **Cost-Aware**: OpenCost integration for cost-based prioritization (coming soon)
@@ -41,7 +40,7 @@
 
 - Kubernetes cluster (v1.11.3+)
 - Prometheus or VictoriaMetrics with cAdvisor container metrics (kube-state-metrics recommended)
-- Git repository access (GitHub, GitLab, or Bitbucket)
+- GitHub repository access (only needed for Git write-back)
 - kubectl configured to access your cluster
 
 ### Installation
@@ -93,15 +92,17 @@ spec:
   target:
     kind: Deployment
     name: payment-service
-  intent: Balanced
+  fitProfileRef:
+    name: percentile-balanced
+    namespace: default  # config/samples/fitprofile-percentile-balanced.yaml
   writeBack:
-    strategy: RawYAML
+    type: raw
     repository: "org/manifests"
     path: "apps/payment-service/deployment.yaml"
     branch: "main"
 ```
 
-3. **Watch Sartor create optimization PRs!**
+3. **Start the controller with `--enable-git-writeback` and watch Sartor create optimization PRs.**
 
 ## Documentation
 
@@ -195,6 +196,7 @@ flowchart TB
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--analysis-interval` | `6h` | How often each Tailoring is re-analyzed. Status-only updates never trigger analysis; spec changes trigger it immediately. |
+| `--enable-git-writeback` | `false` | Opens and updates GitHub pull requests with recommendations. When off, Sartor never reads Git credentials or calls GitHub and only writes recommendations to Tailoring status. Paused Tailorings never touch Git. |
 | `--enable-oom-patching` | `false` | Registers the OOM controller. When off, Sartor does not watch Pods and never patches workloads. When on, it patches only workloads targeted by a non-paused Tailoring, skips excluded containers, and handles each OOM once per cooldown. |
 
 **Pod matching**: Metrics are matched to a workload's pods with kind-specific, anchored pod name patterns (for example `<name>-<hash>-<suffix>` for Deployments and `<name>-<ordinal>` for StatefulSets), so `api` never picks up pods of `api-worker`. When kube-state-metrics is present (`kube_pod_owner`, `kube_replicaset_owner`), pods are matched by their owner instead. Usage is aggregated with `max` across all pods of the workload.
@@ -204,6 +206,14 @@ flowchart TB
 **Credentials**: Secrets referenced by an Atelier (`secretRef`) must live in the controller's namespace (`POD_NAMESPACE`, falling back to the service account namespace). References to other namespaces are rejected without reading the Secret and reported in the `SecretRefsValid` condition. Secrets are read directly from the API server, so the controller only needs `get` on Secrets in its own namespace.
 
 **Server CORS**: The API server sends no CORS headers by default. The UI calls the API same-origin through its proxy. Use `--cors-allowed-origins=https://ui.example.com` (comma-separated, `*` only if set explicitly) to allow cross-origin browsers. Preflight requests are answered before authentication.
+
+### Not yet supported
+
+These fields exist in the API but are not implemented yet:
+
+- **GitLab and Bitbucket**: only `gitProvider.type: github` can write back.
+- **ArgoCD**: Sartor checks connectivity (`status.argoCDConnected`), but `syncOnMerge`, `refreshOnPRCreate` and `hardRefresh` do nothing yet.
+- **OpenCost**: `spec.opencost` is not used by the controller.
 
 ## Concepts
 

@@ -291,7 +291,3 @@ type AtelierList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Atelier `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&Atelier{}, &AtelierList{})
-}
