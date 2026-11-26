@@ -119,7 +119,3 @@ type FitProfileList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []FitProfile `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&FitProfile{}, &FitProfileList{})
-}
