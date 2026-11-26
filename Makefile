@@ -1,5 +1,12 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+SERVER_IMG ?= server:latest
+
+# Version information baked into the binaries via -ldflags.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+DOCKER_BUILD_ARGS ?= --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -153,39 +160,50 @@ run: run-controller ## Run the controller from your host (alias for run-controll
 
 .PHONY: run-controller
 run-controller: manifests generate fmt vet ## Run the controller from your host.
-	go run ./cmd/controller/main.go
+	go run ./cmd/controller
 
 .PHONY: run-server
 run-server: fmt vet ## Run the server from your host.
-	go run ./cmd/server/main.go
+	go run ./cmd/server
 
-# If you wish to build the manager image targeting other platforms you can use the --platform flag.
-# (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
+# The Dockerfiles require BuildKit (default in Docker 23+). To build for another platform
+# use --platform (i.e. docker build --platform linux/arm64); Go cross-compiles, no emulation needed.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) -t ${IMG} .
+
+.PHONY: docker-build-server
+docker-build-server: ## Build docker image with the API server.
+	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) -t ${SERVER_IMG} -f Dockerfile.server .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
+.PHONY: docker-push-server
+docker-push-server: ## Push docker image with the API server.
+	$(CONTAINER_TOOL) push ${SERVER_IMG}
+
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
 # - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
-# - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
-# To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+# The Dockerfiles cross-compile on $BUILDPLATFORM, so no Dockerfile.cross rewrite or QEMU is needed.
+PLATFORMS ?= linux/amd64,linux/arm64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name sartorproj-builder
 	$(CONTAINER_TOOL) buildx use sartorproj-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) $(DOCKER_BUILD_ARGS) --tag ${IMG} -f Dockerfile .
 	- $(CONTAINER_TOOL) buildx rm sartorproj-builder
-	rm Dockerfile.cross
+
+.PHONY: docker-buildx-server
+docker-buildx-server: ## Build and push docker image for the API server for cross-platform support
+	- $(CONTAINER_TOOL) buildx create --name sartorproj-builder
+	$(CONTAINER_TOOL) buildx use sartorproj-builder
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) $(DOCKER_BUILD_ARGS) --tag ${SERVER_IMG} -f Dockerfile.server .
+	- $(CONTAINER_TOOL) buildx rm sartorproj-builder
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
