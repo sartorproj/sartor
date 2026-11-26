@@ -261,7 +261,7 @@ func (w *HelmWriter) findResourcePaths(node *yaml.Node, currentPath string, resu
 		}
 
 		// Check if this is a resources key
-		if key == "resources" && valueNode.Kind == yaml.MappingNode {
+		if key == resourcesKey && valueNode.Kind == yaml.MappingNode {
 			// Determine the container name from the path
 			containerName := "main"
 			if currentPath != "" {

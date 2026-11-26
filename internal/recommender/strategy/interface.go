@@ -26,6 +26,13 @@ import (
 	"github.com/sartorproj/sartor/internal/metrics/prometheus"
 )
 
+const (
+	// StrategyNamePercentile is the registry name of the percentile strategy.
+	StrategyNamePercentile = "percentile"
+	// StrategyNameDSP is the registry name of the DSP strategy.
+	StrategyNameDSP = "dsp"
+)
+
 // Strategy is the interface that all recommendation strategies must implement.
 type Strategy interface {
 	// Name returns the unique name of the strategy.
