@@ -15,6 +15,6 @@ spec:
     repository: https://github.com/example/repo.git
     path: k8s/deployment.yaml
     branch: main
-    format: raw
-  analysisWindow: 7d
+    type: raw
+  analysisWindow: 168h
   paused: false

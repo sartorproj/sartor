@@ -8,7 +8,7 @@ Before installing Sartor, ensure you have:
 
 - **Kubernetes Cluster** (v1.11.3 or later)
 - **Prometheus** with container metrics exposed
-- **Git Repository** access (GitHub, GitLab, or Bitbucket)
+- **GitHub repository** access (only needed for Git write-back)
 - **kubectl** configured to access your cluster
 
 ## Installation
@@ -101,9 +101,11 @@ spec:
   target:
     kind: Deployment
     name: my-app
-  intent: Balanced
+  fitProfileRef:
+    name: percentile-balanced
+    namespace: default  # config/samples/fitprofile-percentile-balanced.yaml
   writeBack:
-    strategy: RawYAML
+    type: raw
     repository: "myorg/manifests"
     path: "apps/my-app/deployment.yaml"
     branch: "main"
@@ -115,6 +117,8 @@ Apply it:
 ```bash
 kubectl apply -f tailoring.yaml
 ```
+
+Pull requests are only opened when the controller runs with `--enable-git-writeback`. Without it, recommendations are only written to the Tailoring status.
 
 ## Verification
 

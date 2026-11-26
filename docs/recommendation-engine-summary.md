@@ -37,7 +37,7 @@ type Strategy interface {
 **Location**: `internal/recommender/strategy/percentile.go`
 
 - Uses P95 for requests, P99 for limits
-- Applies intent-based buffers (Eco: 10-20%, Balanced: 20-30%, Critical: 40-50%)
+- Applies `requestsBufferPercent` and `limitsBufferPercent` from the FitProfile
 - Fast and reliable for most workloads
 - Backward compatible with existing behavior
 
@@ -78,16 +78,16 @@ type Strategy interface {
 
 ## Configuration
 
-### Tailoring CRD Updates
+### FitProfile Configuration
 
-New fields added to `TailoringSpec`:
+Strategies are configured in a `FitProfile`, which Tailorings reference with `spec.fitProfileRef`:
 
 ```yaml
 spec:
-  strategy: "dsp"  # or "percentile" (default)
-  enablePeakDetection: true
-  enableNormalization: false
-  strategyParameters:
+  strategy: "dsp"  # or "percentile"
+  parameters:
+    enablePeakDetection: true
+    enableNormalization: false
     method: "fft"
     marginFraction: 0.2
     lowAmplitudeThreshold: 1.0
@@ -96,7 +96,7 @@ spec:
     maxNumOfSpectrumItems: 20
 ```
 
-**Note**: `strategyParameters` uses `runtime.RawExtension` for CRD compatibility.
+**Note**: `parameters` uses `runtime.RawExtension` for CRD compatibility.
 
 ## Usage Examples
 
@@ -104,22 +104,23 @@ spec:
 
 ```yaml
 apiVersion: autoscaling.sartorproj.io/v1alpha1
-kind: Tailoring
+kind: FitProfile
 spec:
-  strategy: "percentile"  # or omit
-  intent: Balanced
+  strategy: "percentile"
+  parameters:
+    requestsBufferPercent: 20
+    limitsBufferPercent: 30
 ```
 
 ### DSP Strategy with FFT
 
 ```yaml
 apiVersion: autoscaling.sartorproj.io/v1alpha1
-kind: Tailoring
+kind: FitProfile
 spec:
   strategy: "dsp"
-  intent: Balanced
-  enablePeakDetection: true
-  strategyParameters:
+  parameters:
+    enablePeakDetection: true
     method: "fft"
     marginFraction: 0.15
     highFrequencyThreshold: 0.01
@@ -129,10 +130,10 @@ spec:
 
 ```yaml
 apiVersion: autoscaling.sartorproj.io/v1alpha1
-kind: Tailoring
+kind: FitProfile
 spec:
   strategy: "dsp"
-  strategyParameters:
+  parameters:
     method: "maxValue"
     marginFraction: 0.2
 ```
