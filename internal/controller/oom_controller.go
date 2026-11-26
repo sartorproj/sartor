@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,6 +30,7 @@ import (
 )
 
 // OOMController watches for OOMKilled pods and patches workloads.
+// It is only registered when OOM patching is enabled (--enable-oom-patching).
 type OOMController struct {
 	client.Client
 	Scheme      *runtime.Scheme
@@ -63,12 +63,16 @@ func (r *OOMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	logger.Info("Detected OOM events", "pod", pod.Name, "count", len(oomEvents))
 
 	// Handle each OOM event
+	var firstErr error
 	for _, event := range oomEvents {
 		result, err := r.Interceptor.HandleOOMEvent(ctx, event)
 		if err != nil {
 			logger.Error(err, "Failed to handle OOM event",
 				"container", event.ContainerName,
 				"owner", event.OwnerName)
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 
@@ -76,21 +80,15 @@ func (r *OOMController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			logger.Info("Successfully patched workload after OOM",
 				"container", event.ContainerName,
 				"owner", event.OwnerName,
-				"newLimit", result.NewMemoryLimit.String())
-
-			// If there's an associated Tailoring, it will pick up the change
-			// on next reconcile and create a Cut to persist to Git
-			if result.TailoringName != "" {
-				logger.Info("Associated Tailoring will persist change to Git",
-					"tailoring", result.TailoringName)
-			}
+				"newLimit", result.NewMemoryLimit.String(),
+				"tailoring", result.TailoringName)
 		} else {
 			logger.Info("Skipped OOM patch", "reason", result.Message)
 		}
 	}
 
-	// Requeue to check for new OOM events
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	// Pod status changes trigger new reconciles; failures are retried with backoff.
+	return ctrl.Result{}, firstErr
 }
 
 // SetupWithManager sets up the controller with the Manager.

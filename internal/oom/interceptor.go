@@ -19,6 +19,8 @@ package oom
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -145,13 +147,24 @@ func (i *Interceptor) findOwner(pod *corev1.Pod) (kind, name string) {
 		if ref.Controller != nil && *ref.Controller {
 			// Check if it's a ReplicaSet (owned by Deployment)
 			if ref.Kind == "ReplicaSet" {
-				// Try to find the Deployment that owns this ReplicaSet
-				return kindDeployment, extractDeploymentName(ref.Name)
+				return kindDeployment, deploymentNameFromReplicaSet(ref.Name, pod.Labels[appsv1.DefaultDeploymentUniqueLabelKey])
 			}
 			return ref.Kind, ref.Name
 		}
 	}
 	return "", ""
+}
+
+// deploymentNameFromReplicaSet derives the Deployment name from a ReplicaSet
+// name (<deployment>-<pod-template-hash>), using the pod's hash label when
+// present.
+func deploymentNameFromReplicaSet(rsName, podTemplateHash string) string {
+	if podTemplateHash != "" {
+		if name, ok := strings.CutSuffix(rsName, "-"+podTemplateHash); ok {
+			return name
+		}
+	}
+	return extractDeploymentName(rsName)
 }
 
 // extractDeploymentName extracts the Deployment name from a ReplicaSet name.
@@ -166,97 +179,117 @@ func extractDeploymentName(rsName string) string {
 	return rsName
 }
 
+// skipped returns a PatchResult for an event that was deliberately not handled.
+func skipped(format string, args ...interface{}) *PatchResult {
+	return &PatchResult{Success: false, Message: fmt.Sprintf(format, args...)}
+}
+
 // HandleOOMEvent processes an OOM event and patches the workload if appropriate.
+// Only workloads targeted by a non-paused Tailoring are patched, and never for
+// containers the Tailoring excludes.
 func (i *Interceptor) HandleOOMEvent(ctx context.Context, event OOMEvent) (*PatchResult, error) {
 	logger := log.FromContext(ctx)
 
 	if !i.config.Enabled {
-		return &PatchResult{
-			Success: false,
-			Message: "OOM Interceptor is disabled",
-		}, nil
+		return skipped("OOM Interceptor is disabled"), nil
+	}
+
+	tailoring, err := i.findTailoring(ctx, event)
+	if err != nil {
+		return skipped("Failed to look up Tailoring: %v", err), err
+	}
+	if tailoring == nil {
+		return skipped("No Tailoring targets %s/%s", event.OwnerKind, event.OwnerName), nil
+	}
+	if tailoring.Spec.Paused {
+		return skipped("Tailoring %s is paused", tailoring.Name), nil
+	}
+	if slices.Contains(tailoring.Spec.ExcludeContainers, event.ContainerName) {
+		return skipped("Container %s is excluded by Tailoring %s", event.ContainerName, tailoring.Name), nil
 	}
 
 	logger.Info("Handling OOM event",
 		"namespace", event.Namespace,
 		"pod", event.PodName,
 		"container", event.ContainerName,
-		"owner", fmt.Sprintf("%s/%s", event.OwnerKind, event.OwnerName))
+		"owner", fmt.Sprintf("%s/%s", event.OwnerKind, event.OwnerName),
+		"tailoring", tailoring.Name)
 
-	// Check cooldown
-	if i.shouldSkipDueToCooldown(ctx, event) {
-		return &PatchResult{
-			Success: false,
-			Message: "Skipped due to cooldown",
-		}, nil
-	}
-
-	// Calculate new memory limit
-	newLimit := i.calculateNewMemoryLimit(event.CurrentMemoryLimit)
-	if newLimit == nil {
-		return &PatchResult{
-			Success: false,
-			Message: "Unable to calculate new memory limit",
-		}, nil
-	}
-
-	// Apply the patch
-	if err := i.patchWorkload(ctx, event, newLimit); err != nil {
+	obj, podSpec, err := i.getWorkload(ctx, event)
+	if err != nil {
 		return &PatchResult{
 			Success: false,
 			Message: fmt.Sprintf("Failed to patch workload: %v", err),
 		}, err
 	}
 
-	// Find associated Tailoring
-	tailoringName := i.findTailoring(ctx, event)
+	if lastPatch, ok := lastPatchTime(obj); ok {
+		if time.Since(lastPatch) < OOMPatchCooldown {
+			return skipped("Skipped due to cooldown"), nil
+		}
+		// LastTerminationState keeps reporting the same OOM until the next
+		// restart; it must not trigger another increase.
+		if !event.Timestamp.IsZero() && !event.Timestamp.After(lastPatch) {
+			return skipped("OOM at %s was already handled", event.Timestamp.Format(time.RFC3339)), nil
+		}
+	}
+
+	// Calculate new memory limit
+	newLimit := i.calculateNewMemoryLimit(event.CurrentMemoryLimit)
+	if newLimit == nil {
+		return skipped("Unable to calculate new memory limit"), nil
+	}
+
+	if err := i.patchWorkload(ctx, obj, podSpec, event, newLimit); err != nil {
+		return &PatchResult{
+			Success: false,
+			Message: fmt.Sprintf("Failed to patch workload: %v", err),
+		}, err
+	}
 
 	return &PatchResult{
 		Success:        true,
 		NewMemoryLimit: newLimit,
 		Message:        fmt.Sprintf("Memory limit increased from %s to %s", event.CurrentMemoryLimit.String(), newLimit.String()),
-		TailoringName:  tailoringName,
+		TailoringName:  tailoring.Name,
 	}, nil
 }
 
-// shouldSkipDueToCooldown checks if we should skip patching due to cooldown.
-func (i *Interceptor) shouldSkipDueToCooldown(ctx context.Context, event OOMEvent) bool {
-	// Check annotation on the workload
+// lastPatchTime returns when the interceptor last patched the workload.
+func lastPatchTime(obj client.Object) (time.Time, bool) {
+	value, ok := obj.GetAnnotations()[OOMAnnotationKey]
+	if !ok {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// getWorkload fetches the event's owner workload and returns it with its pod spec.
+func (i *Interceptor) getWorkload(ctx context.Context, event OOMEvent) (client.Object, *corev1.PodSpec, error) {
+	key := types.NamespacedName{Name: event.OwnerName, Namespace: event.Namespace}
+	var obj client.Object
+	var podSpec *corev1.PodSpec
 	switch event.OwnerKind {
 	case kindDeployment:
-		deployment := &appsv1.Deployment{}
-		if err := i.client.Get(ctx, types.NamespacedName{
-			Name:      event.OwnerName,
-			Namespace: event.Namespace,
-		}, deployment); err != nil {
-			return false
-		}
-
-		if lastPatch, ok := deployment.Annotations[OOMAnnotationKey]; ok {
-			lastPatchTime, err := time.Parse(time.RFC3339, lastPatch)
-			if err == nil && time.Since(lastPatchTime) < OOMPatchCooldown {
-				return true
-			}
-		}
-
+		d := &appsv1.Deployment{}
+		obj, podSpec = d, &d.Spec.Template.Spec
 	case "StatefulSet":
-		statefulSet := &appsv1.StatefulSet{}
-		if err := i.client.Get(ctx, types.NamespacedName{
-			Name:      event.OwnerName,
-			Namespace: event.Namespace,
-		}, statefulSet); err != nil {
-			return false
-		}
-
-		if lastPatch, ok := statefulSet.Annotations[OOMAnnotationKey]; ok {
-			lastPatchTime, err := time.Parse(time.RFC3339, lastPatch)
-			if err == nil && time.Since(lastPatchTime) < OOMPatchCooldown {
-				return true
-			}
-		}
+		s := &appsv1.StatefulSet{}
+		obj, podSpec = s, &s.Spec.Template.Spec
+	case "DaemonSet":
+		d := &appsv1.DaemonSet{}
+		obj, podSpec = d, &d.Spec.Template.Spec
+	default:
+		return nil, nil, fmt.Errorf("unsupported owner kind: %s", event.OwnerKind)
 	}
-
-	return false
+	if err := i.client.Get(ctx, key, obj); err != nil {
+		return nil, nil, fmt.Errorf("failed to get %s: %w", event.OwnerKind, err)
+	}
+	return obj, podSpec, nil
 }
 
 // calculateNewMemoryLimit calculates the new memory limit after OOM.
@@ -281,158 +314,63 @@ func (i *Interceptor) calculateNewMemoryLimit(current *resource.Quantity) *resou
 	return resource.NewQuantity(newBytes, resource.BinarySI)
 }
 
-// patchWorkload patches the workload with new memory limits.
-func (i *Interceptor) patchWorkload(ctx context.Context, event OOMEvent, newLimit *resource.Quantity) error {
-	switch event.OwnerKind {
-	case kindDeployment:
-		return i.patchDeployment(ctx, event, newLimit)
-	case "StatefulSet":
-		return i.patchStatefulSet(ctx, event, newLimit)
-	case "DaemonSet":
-		return i.patchDaemonSet(ctx, event, newLimit)
-	default:
-		return fmt.Errorf("unsupported owner kind: %s", event.OwnerKind)
-	}
-}
-
-// patchDeployment patches a Deployment with new memory limits.
-func (i *Interceptor) patchDeployment(ctx context.Context, event OOMEvent, newLimit *resource.Quantity) error {
-	deployment := &appsv1.Deployment{}
-	if err := i.client.Get(ctx, types.NamespacedName{
-		Name:      event.OwnerName,
-		Namespace: event.Namespace,
-	}, deployment); err != nil {
-		return fmt.Errorf("failed to get Deployment: %w", err)
-	}
-
-	// Update container resources
-	for i, container := range deployment.Spec.Template.Spec.Containers {
-		if container.Name == event.ContainerName {
-			if deployment.Spec.Template.Spec.Containers[i].Resources.Limits == nil {
-				deployment.Spec.Template.Spec.Containers[i].Resources.Limits = make(corev1.ResourceList)
-			}
-			deployment.Spec.Template.Spec.Containers[i].Resources.Limits[corev1.ResourceMemory] = *newLimit
-
-			// Also update requests if they're set
-			if deployment.Spec.Template.Spec.Containers[i].Resources.Requests != nil {
-				if _, ok := deployment.Spec.Template.Spec.Containers[i].Resources.Requests[corev1.ResourceMemory]; ok {
-					// Set requests to match limits for OOM scenarios
-					deployment.Spec.Template.Spec.Containers[i].Resources.Requests[corev1.ResourceMemory] = *newLimit
-				}
-			}
-			break
+// patchWorkload raises the container's memory limit (and memory request, if
+// set) in the workload's pod template and records the patch in annotations.
+func (i *Interceptor) patchWorkload(ctx context.Context, obj client.Object, podSpec *corev1.PodSpec, event OOMEvent, newLimit *resource.Quantity) error {
+	for idx := range podSpec.Containers {
+		c := &podSpec.Containers[idx]
+		if c.Name != event.ContainerName {
+			continue
 		}
+		if c.Resources.Limits == nil {
+			c.Resources.Limits = make(corev1.ResourceList)
+		}
+		c.Resources.Limits[corev1.ResourceMemory] = *newLimit
+		if _, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+			// Set requests to match limits for OOM scenarios
+			c.Resources.Requests[corev1.ResourceMemory] = *newLimit
+		}
+		break
 	}
 
-	// Add annotation
-	if deployment.Annotations == nil {
-		deployment.Annotations = make(map[string]string)
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
 	}
-	deployment.Annotations[OOMAnnotationKey] = time.Now().Format(time.RFC3339)
-	deployment.Annotations["sartor.sartorproj.io/oom-container"] = event.ContainerName
-	deployment.Annotations["sartor.sartorproj.io/oom-previous-limit"] = event.CurrentMemoryLimit.String()
-	deployment.Annotations["sartor.sartorproj.io/oom-new-limit"] = newLimit.String()
+	annotations[OOMAnnotationKey] = time.Now().Format(time.RFC3339)
+	annotations["sartor.sartorproj.io/oom-container"] = event.ContainerName
+	annotations["sartor.sartorproj.io/oom-previous-limit"] = event.CurrentMemoryLimit.String()
+	annotations["sartor.sartorproj.io/oom-new-limit"] = newLimit.String()
+	obj.SetAnnotations(annotations)
 
-	if err := i.client.Update(ctx, deployment); err != nil {
-		return fmt.Errorf("failed to update Deployment: %w", err)
+	if err := i.client.Update(ctx, obj); err != nil {
+		return fmt.Errorf("failed to update %s: %w", event.OwnerKind, err)
 	}
-
 	return nil
 }
 
-// patchStatefulSet patches a StatefulSet with new memory limits.
-func (i *Interceptor) patchStatefulSet(ctx context.Context, event OOMEvent, newLimit *resource.Quantity) error {
-	statefulSet := &appsv1.StatefulSet{}
-	if err := i.client.Get(ctx, types.NamespacedName{
-		Name:      event.OwnerName,
-		Namespace: event.Namespace,
-	}, statefulSet); err != nil {
-		return fmt.Errorf("failed to get StatefulSet: %w", err)
-	}
-
-	// Update container resources
-	for i, container := range statefulSet.Spec.Template.Spec.Containers {
-		if container.Name == event.ContainerName {
-			if statefulSet.Spec.Template.Spec.Containers[i].Resources.Limits == nil {
-				statefulSet.Spec.Template.Spec.Containers[i].Resources.Limits = make(corev1.ResourceList)
-			}
-			statefulSet.Spec.Template.Spec.Containers[i].Resources.Limits[corev1.ResourceMemory] = *newLimit
-
-			if statefulSet.Spec.Template.Spec.Containers[i].Resources.Requests != nil {
-				if _, ok := statefulSet.Spec.Template.Spec.Containers[i].Resources.Requests[corev1.ResourceMemory]; ok {
-					statefulSet.Spec.Template.Spec.Containers[i].Resources.Requests[corev1.ResourceMemory] = *newLimit
-				}
-			}
-			break
-		}
-	}
-
-	// Add annotation
-	if statefulSet.Annotations == nil {
-		statefulSet.Annotations = make(map[string]string)
-	}
-	statefulSet.Annotations[OOMAnnotationKey] = time.Now().Format(time.RFC3339)
-
-	if err := i.client.Update(ctx, statefulSet); err != nil {
-		return fmt.Errorf("failed to update StatefulSet: %w", err)
-	}
-
-	return nil
-}
-
-// patchDaemonSet patches a DaemonSet with new memory limits.
-func (i *Interceptor) patchDaemonSet(ctx context.Context, event OOMEvent, newLimit *resource.Quantity) error {
-	daemonSet := &appsv1.DaemonSet{}
-	if err := i.client.Get(ctx, types.NamespacedName{
-		Name:      event.OwnerName,
-		Namespace: event.Namespace,
-	}, daemonSet); err != nil {
-		return fmt.Errorf("failed to get DaemonSet: %w", err)
-	}
-
-	// Update container resources
-	for i, container := range daemonSet.Spec.Template.Spec.Containers {
-		if container.Name == event.ContainerName {
-			if daemonSet.Spec.Template.Spec.Containers[i].Resources.Limits == nil {
-				daemonSet.Spec.Template.Spec.Containers[i].Resources.Limits = make(corev1.ResourceList)
-			}
-			daemonSet.Spec.Template.Spec.Containers[i].Resources.Limits[corev1.ResourceMemory] = *newLimit
-
-			if daemonSet.Spec.Template.Spec.Containers[i].Resources.Requests != nil {
-				if _, ok := daemonSet.Spec.Template.Spec.Containers[i].Resources.Requests[corev1.ResourceMemory]; ok {
-					daemonSet.Spec.Template.Spec.Containers[i].Resources.Requests[corev1.ResourceMemory] = *newLimit
-				}
-			}
-			break
-		}
-	}
-
-	// Add annotation
-	if daemonSet.Annotations == nil {
-		daemonSet.Annotations = make(map[string]string)
-	}
-	daemonSet.Annotations[OOMAnnotationKey] = time.Now().Format(time.RFC3339)
-
-	if err := i.client.Update(ctx, daemonSet); err != nil {
-		return fmt.Errorf("failed to update DaemonSet: %w", err)
-	}
-
-	return nil
-}
-
-// findTailoring finds the Tailoring associated with the workload.
-func (i *Interceptor) findTailoring(ctx context.Context, event OOMEvent) string {
+// findTailoring returns the Tailoring targeting the event's workload, or nil.
+// If several Tailorings target it, a paused one wins so pausing any of them
+// stops patching.
+func (i *Interceptor) findTailoring(ctx context.Context, event OOMEvent) (*autoscalingv1alpha1.Tailoring, error) {
 	tailoringList := &autoscalingv1alpha1.TailoringList{}
 	if err := i.client.List(ctx, tailoringList, client.InNamespace(event.Namespace)); err != nil {
-		return ""
+		return nil, err
 	}
 
-	for _, tailoring := range tailoringList.Items {
-		if tailoring.Spec.Target.Name == event.OwnerName &&
-			tailoring.Spec.Target.Kind == event.OwnerKind {
-			return tailoring.Name
+	var found *autoscalingv1alpha1.Tailoring
+	for idx := range tailoringList.Items {
+		tailoring := &tailoringList.Items[idx]
+		if tailoring.Spec.Target.Name != event.OwnerName || tailoring.Spec.Target.Kind != event.OwnerKind {
+			continue
+		}
+		if tailoring.Spec.Paused {
+			return tailoring, nil
+		}
+		if found == nil {
+			found = tailoring
 		}
 	}
 
-	return ""
+	return found, nil
 }
