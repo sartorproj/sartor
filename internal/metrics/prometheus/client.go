@@ -93,7 +93,7 @@ func (b *bearerAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 }
 
 // queryParamsRoundTripper adds the query parameters of the configured URL
-// (e.g. VictoriaMetrics' ?extra_label=cluster=staging) to every request.
+// (e.g. VictoriaMetrics' ?extra_label=cluster=example-cluster) to every request.
 // They are sent once in the URL, also for POST requests whose form body
 // carries the PromQL parameters.
 type queryParamsRoundTripper struct {

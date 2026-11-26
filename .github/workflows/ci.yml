@@ -73,12 +73,13 @@ jobs:
 
       - name: Setup envtest
         run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-          setup-envtest use --bin-dir ./bin
+          # Match controller-runtime and k8s.io/api in go.mod; setup-envtest@latest may need a newer Go.
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.23
+          setup-envtest use 1.35.x --bin-dir "$PWD/bin"
 
       - name: Run tests with coverage
         run: |
-          export KUBEBUILDER_ASSETS="$(setup-envtest use -p path)"
+          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.35.x --bin-dir "$PWD/bin" -p path)"
           go test -v -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Check coverage threshold
