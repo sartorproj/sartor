@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -68,6 +69,17 @@ const (
 type TailoringReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// APIReader reads Secrets straight from the API server, without an informer.
+	// Falls back to Client when nil.
+	APIReader client.Reader
+	// ControllerNamespace is the only namespace Git credentials are read from.
+	ControllerNamespace string
+	// EnableGitWriteBack allows opening and updating pull requests. When false
+	// the controller never contacts the Git provider.
+	EnableGitWriteBack bool
+	// NewGitProvider creates the Git provider; defaults to DefaultGitProviderFactory.
+	NewGitProvider GitProviderFactory
 }
 
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=tailorings,verbs=get;list;watch;create;update;patch;delete
@@ -212,41 +224,14 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{RequeueAfter: AnalysisRequeueInterval}, nil
 	}
 
-	// Check cooldown period
-	if !r.checkCooldownPeriod(tailoring, atelier) {
-		logger.Info("Cooldown period not elapsed, skipping PR creation")
-		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "CooldownActive", "Cooldown period has not elapsed")
-		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
-			return ctrl.Result{}, updateErr
-		}
-		return ctrl.Result{RequeueAfter: AnalysisRequeueInterval}, nil
-	}
-
-	// Check if changes exceed threshold
-	minChangePercent := getMinChangePercent(atelier)
-	if !recommender.ShouldCreateCut(recommendations, currentResources, minChangePercent) {
-		logger.Info("Changes do not exceed threshold, skipping PR creation")
-		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "BelowThreshold", "Resource changes below threshold")
-		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
-			return ctrl.Result{}, updateErr
-		}
-		return ctrl.Result{RequeueAfter: AnalysisRequeueInterval}, nil
-	}
-
-	// TODO: Handle Git PR operations directly
-	// For now, just mark as ready - Git operations will be implemented in a future update
-	logger.Info("Recommendations calculated, Git operations not yet implemented")
-	r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "Ready", "Recommendations calculated")
-	result := ctrl.Result{RequeueAfter: AnalysisRequeueInterval}
+	r.reconcileGitOps(ctx, tailoring, atelier, currentResources, logger)
 
 	if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
 		logger.Error(updateErr, "Failed to update status")
 		return ctrl.Result{}, updateErr
 	}
 
-	return result, nil
+	return ctrl.Result{RequeueAfter: AnalysisRequeueInterval}, nil
 }
 
 // handleReconcileError handles an error during reconciliation by updating the status and returning the appropriate result.
@@ -359,6 +344,21 @@ func (r *TailoringReconciler) getTargetResources(ctx context.Context, tailoring 
 	}
 
 	return resources, nil
+}
+
+// secretReader returns the reader used for Secrets.
+func (r *TailoringReconciler) secretReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+func quantityString(q *resource.Quantity) string {
+	if q == nil {
+		return ""
+	}
+	return q.String()
 }
 
 // convertResourceValues converts corev1.ResourceList to autoscalingv1alpha1.ResourceValues.

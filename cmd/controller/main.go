@@ -63,6 +63,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var enableGitWriteBack bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -81,6 +82,9 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&enableGitWriteBack, "enable-git-writeback", false,
+		"If set, Sartor opens and updates pull requests with its recommendations. "+
+			"When unset (the default) the controller never contacts the Git provider.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -180,16 +184,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Git credentials are only read from the controller's own namespace.
+	controllerNamespace := os.Getenv("POD_NAMESPACE")
+	if enableGitWriteBack && controllerNamespace == "" {
+		setupLog.Error(nil, "--enable-git-writeback requires the POD_NAMESPACE environment variable")
+		os.Exit(1)
+	}
+	setupLog.Info("git write-back", "enabled", enableGitWriteBack)
+
 	if err := (&controller.TailoringReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		APIReader:           mgr.GetAPIReader(),
+		ControllerNamespace: controllerNamespace,
+		EnableGitWriteBack:  enableGitWriteBack,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Tailoring")
 		os.Exit(1)
 	}
 	if err := (&controller.AtelierReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		APIReader:           mgr.GetAPIReader(),
+		ControllerNamespace: controllerNamespace,
+		EnableGitWriteBack:  enableGitWriteBack,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Atelier")
 		os.Exit(1)
