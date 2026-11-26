@@ -62,6 +62,19 @@ type TargetRef struct {
 	// Name is the name of the target resource.
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
+
+	// Namespace is the namespace of the target workload. Defaults to the
+	// Tailoring's namespace.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Cluster is the value of the Atelier's prometheus.clusterLabel that
+	// selects the target workload's cluster in the metrics backend.
+	// Required when clusterLabel is set.
+	// +optional
+	Cluster string `json:"cluster,omitempty"`
 }
 
 // WriteBackConfig defines how to write recommendations back to Git.
@@ -197,6 +210,39 @@ type FitProfileRef struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
+// AutoscalerKind is the kind of a detected autoscaler.
+// +kubebuilder:validation:Enum=HorizontalPodAutoscaler;VerticalPodAutoscaler;ScaledObject
+type AutoscalerKind string
+
+const (
+	AutoscalerKindHPA          AutoscalerKind = "HorizontalPodAutoscaler"
+	AutoscalerKindVPA          AutoscalerKind = "VerticalPodAutoscaler"
+	AutoscalerKindScaledObject AutoscalerKind = "ScaledObject"
+)
+
+// DetectedAutoscaler is an autoscaler that targets the Tailoring's workload.
+type DetectedAutoscaler struct {
+	// Kind is the autoscaler kind.
+	Kind AutoscalerKind `json:"kind"`
+
+	// Name is the autoscaler name. Empty when the source does not expose it.
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// UpdateMode is the VPA update mode (Off, Initial, Recreate, Auto, ...).
+	// +optional
+	UpdateMode string `json:"updateMode,omitempty"`
+
+	// UtilizationResources lists the resources (cpu, memory) the HPA scales
+	// on with a Utilization target, i.e. relative to the requests.
+	// +optional
+	UtilizationResources []string `json:"utilizationResources,omitempty"`
+
+	// ManagedBy names the ScaledObject that owns this HPA, if known.
+	// +optional
+	ManagedBy string `json:"managedBy,omitempty"`
+}
+
 // PRState represents the state of a Pull Request.
 // +kubebuilder:validation:Enum=pending;open;merged;closed
 type PRState string
@@ -228,6 +274,21 @@ type TailoringStatus struct {
 	// +optional
 	VPADetected bool `json:"vpaDetected,omitempty"`
 
+	// Autoscalers lists the autoscalers detected for the target workload at
+	// the last analysis.
+	// +optional
+	Autoscalers []DetectedAutoscaler `json:"autoscalers,omitempty"`
+
+	// OOMKilledContainers lists the containers whose last termination was an
+	// OOM kill at the last analysis (from metrics). Their memory is not lowered.
+	// +optional
+	OOMKilledContainers []string `json:"oomKilledContainers,omitempty"`
+
+	// ConsecutiveFailures counts the failed analyses since the last
+	// successful one; retries back off exponentially.
+	// +optional
+	ConsecutiveFailures int32 `json:"consecutiveFailures,omitempty"`
+
 	// TargetFound indicates if the target workload exists.
 	// +optional
 	TargetFound bool `json:"targetFound,omitempty"`
@@ -237,7 +298,8 @@ type TailoringStatus struct {
 	NextAnalysisTime *metav1.Time `json:"nextAnalysisTime,omitempty"`
 
 	// ObservedGeneration is the metadata.generation of the spec that
-	// LastAnalysis was computed from. A newer generation forces re-analysis.
+	// LastAnalysis was computed from. Spec changes are picked up by the next
+	// scheduled analysis; they do not trigger one.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
@@ -322,4 +384,13 @@ type TailoringList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Tailoring `json:"items"`
+}
+
+// TargetNamespace returns the namespace of the target workload:
+// spec.target.namespace, or the Tailoring's own namespace when unset.
+func (t *Tailoring) TargetNamespace() string {
+	if t.Spec.Target.Namespace != "" {
+		return t.Spec.Target.Namespace
+	}
+	return t.Namespace
 }

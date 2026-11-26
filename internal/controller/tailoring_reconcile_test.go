@@ -62,28 +62,46 @@ func TestAnalysisDueIn(t *testing.T) {
 	tests := []struct {
 		name       string
 		interval   time.Duration
+		offset     float64
 		generation int64
 		observed   int64
+		created    time.Duration
+		failures   int32
+		next       *time.Duration
 		last       *autoscalingv1alpha1.AnalysisResult
 		want       time.Duration
 	}{
 		{name: "never analyzed", generation: 1, want: 0},
+		{name: "never analyzed, spread after creation", generation: 1, offset: 0.5, want: 5 * time.Minute},
+		{name: "never analyzed, created long ago", generation: 1, offset: 0.5, created: 48 * time.Hour, want: 0},
 		{name: "zero timestamp", generation: 1, observed: 1, last: &autoscalingv1alpha1.AnalysisResult{}, want: 0},
 		{name: "fresh, spec unchanged", generation: 1, observed: 1, last: analysis(time.Hour), want: 5 * time.Hour},
-		{name: "fresh, spec changed", generation: 2, observed: 1, last: analysis(time.Hour), want: 0},
-		{name: "fresh, status written by older controller (observed 0)", generation: 3, observed: 0, last: analysis(time.Minute), want: 0},
+		{name: "fresh, spec changed: no fresh queries", generation: 2, observed: 1, last: analysis(time.Hour), want: 5 * time.Hour},
+		{name: "fresh, status written by older controller (observed 0)", generation: 3, observed: 0, last: analysis(time.Minute), want: 6*time.Hour - time.Minute},
+		{name: "fresh, with spread offset", generation: 1, observed: 1, offset: 0.5, last: analysis(time.Hour), want: 5*time.Hour + 18*time.Minute},
 		{name: "stale", generation: 1, observed: 1, last: analysis(7 * time.Hour), want: 0},
 		{name: "exactly at interval", generation: 1, observed: 1, last: analysis(6 * time.Hour), want: 0},
 		{name: "custom interval", interval: 30 * time.Minute, generation: 1, observed: 1, last: analysis(10 * time.Minute), want: 20 * time.Minute},
 		{name: "future timestamp capped at one interval", generation: 1, observed: 1, last: analysis(-48 * time.Hour), want: 6 * time.Hour},
+		{name: "failure backoff wins over a fresh analysis", generation: 1, observed: 1, last: analysis(7 * time.Hour), failures: 2, next: ptrDuration(10 * time.Minute), want: 10 * time.Minute},
+		{name: "failure backoff elapsed", generation: 1, observed: 1, failures: 3, next: ptrDuration(-time.Second), want: 0},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &TailoringReconciler{AnalysisInterval: tt.interval, now: func() time.Time { return now }}
+			r := &TailoringReconciler{
+				AnalysisInterval: tt.interval,
+				now:              func() time.Time { return now },
+				jitter:           func(*autoscalingv1alpha1.Tailoring) float64 { return tt.offset },
+			}
 			tl := &autoscalingv1alpha1.Tailoring{
-				ObjectMeta: metav1.ObjectMeta{Generation: tt.generation},
-				Status:     autoscalingv1alpha1.TailoringStatus{LastAnalysis: tt.last, ObservedGeneration: tt.observed},
+				ObjectMeta: metav1.ObjectMeta{Generation: tt.generation, CreationTimestamp: metav1.NewTime(now.Add(-tt.created))},
+				Status: autoscalingv1alpha1.TailoringStatus{
+					LastAnalysis: tt.last, ObservedGeneration: tt.observed, ConsecutiveFailures: tt.failures,
+				},
+			}
+			if tt.next != nil {
+				tl.Status.NextAnalysisTime = &metav1.Time{Time: now.Add(*tt.next)}
 			}
 			if got := r.analysisDueIn(tl); got != tt.want {
 				t.Fatalf("analysisDueIn = %v, want %v", got, tt.want)
@@ -91,6 +109,8 @@ func TestAnalysisDueIn(t *testing.T) {
 		})
 	}
 }
+
+func ptrDuration(d time.Duration) *time.Duration { return &d }
 
 func TestTailoringPredicates(t *testing.T) {
 	base := func() *autoscalingv1alpha1.Tailoring {
@@ -205,8 +225,8 @@ func reconcileFixtures(promURL string) []client.Object {
 	}
 }
 
-// TestTailoringReconcile_NoAnalysisLoop checks that the status write after an
-// analysis does not cause another analysis, while a spec change or an expired
+// TestTailoringReconcile_NoAnalysisLoop checks that neither the status write
+// after an analysis nor a spec change causes another analysis; only an expired
 // interval does.
 func TestTailoringReconcile_NoAnalysisLoop(t *testing.T) {
 	server, calls := fakePrometheus(t)
@@ -218,7 +238,11 @@ func TestTailoringReconcile_NoAnalysisLoop(t *testing.T) {
 
 	// metav1.Time is persisted with second precision.
 	now := time.Now().Truncate(time.Second)
-	r := &TailoringReconciler{Client: c, Scheme: c.Scheme(), AnalysisInterval: 6 * time.Hour, now: func() time.Time { return now }}
+	r := &TailoringReconciler{
+		Client: c, Scheme: c.Scheme(), AnalysisInterval: 6 * time.Hour,
+		now:    func() time.Time { return now },
+		jitter: func(*autoscalingv1alpha1.Tailoring) float64 { return 0 },
+	}
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "example", Name: "web"}}
 	ctx := context.Background()
 
@@ -244,7 +268,7 @@ func TestTailoringReconcile_NoAnalysisLoop(t *testing.T) {
 			wantRequeue: 4 * time.Hour,
 		},
 		{
-			name: "spec change re-analyzes",
+			name: "spec change does not re-query",
 			before: func() {
 				tl := get()
 				tl.Spec.ExcludeContainers = []string{"sidecar"}
@@ -253,16 +277,15 @@ func TestTailoringReconcile_NoAnalysisLoop(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			wantQueries: true,
-			wantRequeue: 6 * time.Hour,
+			wantRequeue: 4 * time.Hour,
 		},
-		{name: "unchanged after spec re-analysis is skipped", wantRequeue: 6 * time.Hour},
 		{
-			name:        "interval elapsed re-analyzes",
-			before:      func() { now = now.Add(6*time.Hour + time.Second) },
+			name:        "interval elapsed re-analyzes and picks up the spec change",
+			before:      func() { now = now.Add(4*time.Hour + time.Second) },
 			wantQueries: true,
 			wantRequeue: 6 * time.Hour,
 		},
+		{name: "unchanged after re-analysis is skipped", wantRequeue: 6 * time.Hour},
 	}
 
 	for _, step := range steps {
@@ -283,7 +306,7 @@ func TestTailoringReconcile_NoAnalysisLoop(t *testing.T) {
 				t.Fatalf("queried Prometheus = %v, want %v", queried, step.wantQueries)
 			}
 			tl := get()
-			if tl.Status.LastAnalysis == nil || tl.Status.ObservedGeneration != tl.Generation {
+			if tl.Status.LastAnalysis == nil || (step.wantQueries && tl.Status.ObservedGeneration != tl.Generation) {
 				t.Fatalf("status not recorded: lastAnalysis=%v observedGeneration=%d generation=%d",
 					tl.Status.LastAnalysis, tl.Status.ObservedGeneration, tl.Generation)
 			}

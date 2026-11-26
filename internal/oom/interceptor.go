@@ -364,6 +364,11 @@ func (i *Interceptor) findTailoring(ctx context.Context, event OOMEvent) (*autos
 		if tailoring.Spec.Target.Name != event.OwnerName || tailoring.Spec.Target.Kind != event.OwnerKind {
 			continue
 		}
+		// A Tailoring that targets another namespace does not own this workload,
+		// and OOM patching never follows a target into another namespace.
+		if tailoring.TargetNamespace() != event.Namespace {
+			continue
+		}
 		if tailoring.Spec.Paused {
 			return tailoring, nil
 		}

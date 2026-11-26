@@ -50,6 +50,16 @@ type Request struct {
 	Title         string
 	Body          string
 	CommitMessage string
+
+	// Current holds the live requests of the updated containers; it decides
+	// which resources' requests change (for HPA scaling-point notes).
+	Current map[string]*writer.ResourceValues
+	// Autoscalers are the autoscalers detected for the workload.
+	Autoscalers []autoscalingv1alpha1.DetectedAutoscaler
+	// LiveFromPods means the live values were read from running pods
+	// (metrics-only mode): containers missing from Git are skipped instead of
+	// added or failing, since pods can carry injected sidecars.
+	LiveFromPods bool
 }
 
 // Outcome describes what Apply did.
@@ -70,6 +80,17 @@ type Result struct {
 	// PR is the open pull request, if any.
 	PR        *provider.PullRequest
 	CommitSHA string
+	// Autoscalers reports the autoscalers edited (or left alone) in Git.
+	Autoscalers []writer.AutoscalerNote
+	// Skipped lists containers not written because they are not in Git.
+	Skipped []string
+}
+
+// rendered is the outcome of rendering the request at one ref.
+type rendered struct {
+	changes     []provider.FileChange
+	autoscalers []writer.AutoscalerNote
+	skipped     []string
 }
 
 // Validate checks a request without contacting Git.
@@ -118,12 +139,13 @@ func Apply(ctx context.Context, p provider.Provider, req Request) (*Result, erro
 		return updateOpen(ctx, p, req, open)
 	}
 
-	changes, err := renderChanges(ctx, p, req, req.BaseBranch)
+	r, err := renderChanges(ctx, p, req, req.BaseBranch)
 	if err != nil {
 		return nil, err
 	}
-	if len(changes) == 0 {
-		return &Result{Outcome: OutcomeUnchanged}, nil
+	result := &Result{Outcome: OutcomeUnchanged, Autoscalers: r.autoscalers, Skipped: r.skipped}
+	if len(r.changes) == 0 {
+		return result, nil
 	}
 
 	if err := p.ResetBranch(ctx, req.Repository, req.Branch, req.BaseBranch); err != nil {
@@ -133,16 +155,17 @@ func Apply(ctx context.Context, p provider.Provider, req Request) (*Result, erro
 		Repository: req.Repository,
 		Branch:     req.Branch,
 		Message:    req.CommitMessage,
-		Changes:    changes,
+		Changes:    r.changes,
 	})
 	if err != nil {
 		return nil, err
 	}
+	result.CommitSHA = sha
 
 	pr, err := p.CreatePullRequest(ctx, provider.CreatePRRequest{
 		Repository: req.Repository,
 		Title:      req.Title,
-		Body:       req.Body,
+		Body:       req.Body + autoscalingSection(req, r),
 		HeadBranch: req.Branch,
 		BaseBranch: req.BaseBranch,
 	})
@@ -154,82 +177,77 @@ func Apply(ctx context.Context, p provider.Provider, req Request) (*Result, erro
 		if existing == nil {
 			return nil, err
 		}
-		return &Result{Outcome: OutcomeUpdated, PR: existing, CommitSHA: sha}, nil
+		result.Outcome, result.PR = OutcomeUpdated, existing
+		return result, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Result{Outcome: OutcomeCreated, PR: pr, CommitSHA: sha}, nil
+	result.Outcome, result.PR = OutcomeCreated, pr
+	return result, nil
 }
 
 func updateOpen(ctx context.Context, p provider.Provider, req Request, open *provider.PullRequest) (*Result, error) {
-	changes, err := renderChanges(ctx, p, req, req.Branch)
+	r, err := renderChanges(ctx, p, req, req.Branch)
 	if err != nil {
 		return nil, err
 	}
-	if len(changes) == 0 {
-		return &Result{Outcome: OutcomeUnchanged, PR: open}, nil
+	result := &Result{Outcome: OutcomeUnchanged, PR: open, Autoscalers: r.autoscalers, Skipped: r.skipped}
+	if len(r.changes) == 0 {
+		return result, nil
 	}
 	sha, err := p.Commit(ctx, provider.CommitRequest{
 		Repository: req.Repository,
 		Branch:     req.Branch,
 		Message:    req.CommitMessage,
-		Changes:    changes,
+		Changes:    r.changes,
 	})
 	if err != nil {
 		return nil, err
 	}
-	updated, err := p.UpdatePullRequest(ctx, req.Repository, open.Number, req.Title, req.Body)
+	updated, err := p.UpdatePullRequest(ctx, req.Repository, open.Number, req.Title, req.Body+autoscalingSection(req, r))
 	if err != nil {
 		return nil, err
 	}
-	return &Result{Outcome: OutcomeUpdated, PR: updated, CommitSHA: sha}, nil
+	result.Outcome, result.PR, result.CommitSHA = OutcomeUpdated, updated, sha
+	return result, nil
 }
 
 // renderChanges returns the file changes needed at ref, omitting files whose content is unchanged.
-func renderChanges(ctx context.Context, p provider.Provider, req Request, ref string) ([]provider.FileChange, error) {
-	switch req.Type {
-	case autoscalingv1alpha1.WriteBackTypeRaw:
-		content, err := p.GetFileContent(ctx, req.Repository, req.Path, ref)
-		if err != nil {
-			return nil, err
-		}
-		updated, err := writer.NewRawWriter().UpdateManifestFor(content,
-			writer.ManifestTarget{Kind: req.Target.Kind, Name: req.Target.Name}, req.Updates)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", req.Path, err)
-		}
-		return changed(req.Path, content, updated), nil
-
-	case autoscalingv1alpha1.WriteBackTypeHelm:
-		content, err := p.GetFileContent(ctx, req.Repository, req.Path, ref)
-		if err != nil {
-			return nil, err
-		}
-		updated, err := writer.NewHelmWriter().UpdateValues(content, req.Updates, req.HelmValuePath)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", req.Path, err)
-		}
-		return changed(req.Path, content, updated), nil
-
-	case autoscalingv1alpha1.WriteBackTypeKustomize:
-		return renderKustomize(ctx, p, req, ref)
-	}
-	return nil, fmt.Errorf("unsupported writeBack type %q", req.Type)
-}
-
-// renderKustomize updates the existing strategic merge patch at req.Path.
-func renderKustomize(ctx context.Context, p provider.Provider, req Request, ref string) ([]provider.FileChange, error) {
+func renderChanges(ctx context.Context, p provider.Provider, req Request, ref string) (*rendered, error) {
 	content, err := p.GetFileContent(ctx, req.Repository, req.Path, ref)
 	if err != nil {
 		return nil, err
 	}
-	updated, err := writer.NewKustomizeWriter().UpdatePatchFor(content,
-		writer.ManifestTarget{Kind: req.Target.Kind, Name: req.Target.Name}, req.Updates)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", req.Path, err)
+	target := writer.ManifestTarget{Kind: req.Target.Kind, Name: req.Target.Name}
+	r := &rendered{}
+	var updated []byte
+	switch req.Type {
+	case autoscalingv1alpha1.WriteBackTypeRaw:
+		res, err := writer.NewRawWriter().Update(content, target, req.Updates,
+			writer.RawOptions{SkipMissingContainers: req.LiveFromPods})
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", req.Path, err)
+		}
+		updated, r.autoscalers, r.skipped = res.Content, res.Autoscalers, res.Skipped
+
+	case autoscalingv1alpha1.WriteBackTypeHelm:
+		updated, err = writer.NewHelmWriter().UpdateValues(content, req.Updates, req.HelmValuePath)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", req.Path, err)
+		}
+
+	case autoscalingv1alpha1.WriteBackTypeKustomize:
+		updated, r.skipped, err = writer.NewKustomizeWriter().UpdateExistingPatchFor(content, target, req.Updates, req.LiveFromPods)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", req.Path, err)
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported writeBack type %q", req.Type)
 	}
-	return changed(req.Path, content, updated), nil
+	r.changes = changed(req.Path, content, updated)
+	return r, nil
 }
 
 func changed(p string, before, after []byte) []provider.FileChange {

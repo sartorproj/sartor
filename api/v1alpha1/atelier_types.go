@@ -38,6 +38,13 @@ type PrometheusConfig struct {
 	// InsecureSkipVerify skips TLS certificate verification.
 	// +optional
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
+
+	// ClusterLabel is the label that identifies a workload's cluster on every
+	// series (for example "cluster"). When set, every query matches it against
+	// the Tailoring's spec.target.cluster, so one backend can hold many clusters.
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_]*$`
+	// +optional
+	ClusterLabel string `json:"clusterLabel,omitempty"`
 }
 
 // GitProviderType defines the type of Git provider.

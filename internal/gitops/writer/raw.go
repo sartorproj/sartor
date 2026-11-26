@@ -69,23 +69,11 @@ func (w *RawWriter) UpdateManifest(content []byte, updates []ResourceUpdate) ([]
 // UpdateManifestFor updates the resource requests/limits of the workload matching target.
 // Only the changed scalar values are rewritten; comments and formatting are preserved.
 func (w *RawWriter) UpdateManifestFor(content []byte, target ManifestTarget, updates []ResourceUpdate) ([]byte, error) {
-	f, err := parseYAMLFile(content)
+	res, err := w.Update(content, target, updates, RawOptions{})
 	if err != nil {
 		return nil, err
 	}
-
-	containers, err := findTargetContainers(f, target)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, update := range updates {
-		if err := updateContainer(f, containers, update); err != nil {
-			return nil, fmt.Errorf("failed to update container %s: %w", update.ContainerName, err)
-		}
-	}
-
-	return f.render()
+	return res.Content, nil
 }
 
 // findTargetContainers returns the containers sequence of the document matching target.

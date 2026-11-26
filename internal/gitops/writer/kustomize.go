@@ -151,16 +151,24 @@ func (w *KustomizeWriter) UpdatePatch(content []byte, updates []ResourceUpdate) 
 // UpdatePatchFor updates the strategic merge patch for target with new resource values.
 // Containers missing from the patch are appended (strategic merge matches them by name).
 func (w *KustomizeWriter) UpdatePatchFor(content []byte, target ManifestTarget, updates []ResourceUpdate) ([]byte, error) {
+	out, _, err := w.UpdateExistingPatchFor(content, target, updates, false)
+	return out, err
+}
+
+// UpdateExistingPatchFor is UpdatePatchFor; with skipMissing, containers not
+// already in the patch are skipped and returned instead of appended, because
+// a name-only container appended for a sidecar would add an invalid container.
+func (w *KustomizeWriter) UpdateExistingPatchFor(content []byte, target ManifestTarget, updates []ResourceUpdate, skipMissing bool) ([]byte, []string, error) {
 	f, err := parseYAMLFile(content)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
 
 	var doc *yaml.Node
 	for i := range f.docs {
 		m, err := f.rootMapping(i)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if documentMatches(m, target) {
 			doc = m
@@ -168,38 +176,43 @@ func (w *KustomizeWriter) UpdatePatchFor(content []byte, target ManifestTarget, 
 		}
 	}
 	if doc == nil {
-		return nil, fmt.Errorf("%s %q not found in patch", target.Kind, target.Name)
+		return nil, nil, fmt.Errorf("%s %q not found in patch", target.Kind, target.Name)
 	}
 
 	// Navigate to spec.template.spec.containers
 	spec := findKey(doc, "spec")
 	if spec == nil {
-		return nil, fmt.Errorf("spec not found in patch")
+		return nil, nil, fmt.Errorf("spec not found in patch")
 	}
 
 	template := findKey(spec, "template")
 	if template == nil {
-		return nil, fmt.Errorf("spec.template not found in patch")
+		return nil, nil, fmt.Errorf("spec.template not found in patch")
 	}
 
 	templateSpec := findKey(template, "spec")
 	if templateSpec == nil {
-		return nil, fmt.Errorf("spec.template.spec not found in patch")
+		return nil, nil, fmt.Errorf("spec.template.spec not found in patch")
 	}
 
 	containers := findKey(templateSpec, "containers")
 	if containers == nil {
-		return nil, fmt.Errorf("containers not found in patch")
+		return nil, nil, fmt.Errorf("containers not found in patch")
 	}
 
-	// Update each container
+	var skipped []string
 	for _, update := range updates {
+		if skipMissing && !hasContainer(containers, update.ContainerName) {
+			skipped = append(skipped, update.ContainerName)
+			continue
+		}
 		if err := updateContainerInPatch(f, containers, update); err != nil {
-			return nil, fmt.Errorf("failed to update container %s: %w", update.ContainerName, err)
+			return nil, nil, fmt.Errorf("failed to update container %s: %w", update.ContainerName, err)
 		}
 	}
 
-	return f.render()
+	out, err := f.render()
+	return out, skipped, err
 }
 
 // updateContainerInPatch updates a container's resources in the patch.

@@ -45,11 +45,17 @@ rules:
 - apiGroups:
   - autoscaling
   resources:
+  - horizontalpodautoscalers
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - autoscaling.k8s.io
+  resources:
   - verticalpodautoscalers
   verbs:
   - get
   - list
-  - watch
 - apiGroups:
   - autoscaling.sartorproj.io
   resources:
@@ -82,3 +88,10 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - keda.sh
+  resources:
+  - scaledobjects
+  verbs:
+  - get
+  - list
