@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -789,7 +790,10 @@ func (h *Handler) GetMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Query Prometheus for metrics
-	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.Namespace, tailoring.Spec.Target.Name, analysisWindow)
+	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.Namespace, prometheus.Workload{
+		Kind: tailoring.Spec.Target.Kind,
+		Name: tailoring.Spec.Target.Name,
+	}, analysisWindow)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get metrics: %v", err))
 		return
@@ -801,20 +805,47 @@ func (h *Handler) GetMetrics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxTimeSeriesWindow bounds the range of time series queries.
+const maxTimeSeriesWindow = 31 * 24 * time.Hour
+
 // GetPrometheusMetrics returns Prometheus time series metrics for a specific container.
+// Query parameters: namespace, name (or legacy podNamePrefix), kind
+// (Deployment, StatefulSet or DaemonSet; default Deployment), containerName,
+// resourceType (cpu or memory) and window.
 func (h *Handler) GetPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
 	// Parse query parameters
 	namespace := r.URL.Query().Get("namespace")
-	podNamePrefix := r.URL.Query().Get("podNamePrefix")
+	// workloadName is the workload name; podNamePrefix is the legacy parameter name.
+	workloadName := r.URL.Query().Get("name")
+	if workloadName == "" {
+		workloadName = r.URL.Query().Get("podNamePrefix")
+	}
+	kind := r.URL.Query().Get("kind")
+	if kind == "" {
+		kind = prometheus.KindDeployment
+	}
 	containerName := r.URL.Query().Get("containerName")
 	resourceType := r.URL.Query().Get("resourceType") // "cpu" or "memory"
 	windowStr := r.URL.Query().Get("window")
 
-	if namespace == "" || podNamePrefix == "" || containerName == "" || resourceType == "" {
-		writeError(w, http.StatusBadRequest, "Missing required parameters: namespace, podNamePrefix, containerName, resourceType")
+	if namespace == "" || workloadName == "" || containerName == "" || resourceType == "" {
+		writeError(w, http.StatusBadRequest, "Missing required parameters: namespace, name (or podNamePrefix), containerName, resourceType")
+		return
+	}
+	workload := prometheus.Workload{Kind: kind, Name: workloadName}
+	if _, err := prometheus.PodNameRegex(workload); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := prometheus.ValidateQueryTarget(namespace, workload, containerName); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if resourceType != prometheus.ResourceTypeCPU && resourceType != prometheus.ResourceTypeMemory {
+		writeError(w, http.StatusBadRequest, "resourceType must be cpu or memory")
 		return
 	}
 
@@ -825,6 +856,10 @@ func (h *Handler) GetPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 		window, err = time.ParseDuration(windowStr)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid window duration: %v", err))
+			return
+		}
+		if window <= 0 || window > maxTimeSeriesWindow {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("window must be between 0 and %s", maxTimeSeriesWindow))
 			return
 		}
 	}
@@ -844,7 +879,7 @@ func (h *Handler) GetPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Query Prometheus for time series data
-	points, err := promClient.GetTimeSeriesMetrics(ctx, namespace, podNamePrefix, containerName, resourceType, window)
+	points, err := promClient.GetTimeSeriesMetrics(ctx, namespace, workload, containerName, resourceType, window)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get time series metrics: %v", err))
 		return
@@ -1498,20 +1533,67 @@ func AuthMiddleware(apiKeys map[string]bool, next http.Handler) http.Handler {
 	})
 }
 
-// CORSMiddleware adds CORS headers.
-func CORSMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
+// CORSMiddleware adds CORS headers for the allowed origins. An empty list
+// disables CORS (same-origin only); "*" must be listed explicitly to allow
+// any origin. Preflight requests are answered here, so this middleware must
+// wrap AuthMiddleware: browsers never send X-API-Key on a preflight.
+func CORSMiddleware(allowedOrigins []string, next http.Handler) http.Handler {
+	allowAny := slices.Contains(allowedOrigins, "*")
+	allowed := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		allowed[strings.TrimSuffix(o, "/")] = true
+	}
 
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		preflight := r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != ""
+
+		if origin != "" && len(allowedOrigins) > 0 {
+			w.Header().Add("Vary", "Origin")
+			if allowAny || allowed[origin] {
+				if allowAny {
+					w.Header().Set("Access-Control-Allow-Origin", "*")
+				} else {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+				}
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
+				w.Header().Set("Access-Control-Max-Age", "600")
+			}
+		}
+
+		if preflight && origin != "" {
+			// Disallowed origins get no CORS headers, so the browser blocks them.
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// ParseOrigins splits a comma-separated origin list, dropping empty entries.
+func ParseOrigins(value string) []string {
+	var origins []string
+	for _, o := range strings.Split(value, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
+	}
+	return origins
+}
+
+// WrapHandler applies the server middleware in the required order: CORS
+// outermost (so preflights are answered without credentials), then API key
+// authentication when keys are configured.
+func WrapHandler(next http.Handler, apiKeys map[string]bool, corsOrigins []string) http.Handler {
+	if len(apiKeys) > 0 {
+		next = AuthMiddleware(apiKeys, next)
+	}
+	if len(corsOrigins) > 0 {
+		next = CORSMiddleware(corsOrigins, next)
+	}
+	return next
 }
 
 // ListStrategies lists all available recommendation strategies.

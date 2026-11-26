@@ -144,7 +144,10 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Query Prometheus for metrics
-	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.Namespace, tailoring.Spec.Target.Name, analysisWindow)
+	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.Namespace, prometheus.Workload{
+		Kind: tailoring.Spec.Target.Kind,
+		Name: tailoring.Spec.Target.Name,
+	}, analysisWindow)
 	if err != nil {
 		logger.Error(err, "Failed to get container metrics")
 		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "MetricsQueryError", err.Error())
