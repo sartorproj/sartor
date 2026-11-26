@@ -24,6 +24,9 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// jsonPatchOpReplace is the RFC 6902 JSON Patch "replace" operation.
+const jsonPatchOpReplace = "replace"
+
 // KustomizeWriter generates and updates Kustomize patches.
 type KustomizeWriter struct{}
 
@@ -233,7 +236,7 @@ func updateContainerInPatch(f *yamlFile, containers *yaml.Node, update ResourceU
 		containers.Content = append(containers.Content, containerNode)
 	}
 
-	resources, err := f.ensureMapping(containerNode, "resources")
+	resources, err := f.ensureMapping(containerNode, resourcesKey)
 	if err != nil {
 		return err
 	}
@@ -257,14 +260,14 @@ func (w *KustomizeWriter) GenerateJSONPatch(updates []ResourceUpdate) ([]byte, e
 		if update.Requests != nil {
 			if update.Requests.CPU != nil {
 				patches = append(patches, JSONPatch{
-					Op:    jsonPatchReplace,
+					Op:    jsonPatchOpReplace,
 					Path:  fmt.Sprintf("/spec/template/spec/containers/%d/resources/requests/cpu", containerIndex),
 					Value: update.Requests.CPU.String(),
 				})
 			}
 			if update.Requests.Memory != nil {
 				patches = append(patches, JSONPatch{
-					Op:    jsonPatchReplace,
+					Op:    jsonPatchOpReplace,
 					Path:  fmt.Sprintf("/spec/template/spec/containers/%d/resources/requests/memory", containerIndex),
 					Value: update.Requests.Memory.String(),
 				})
@@ -274,14 +277,14 @@ func (w *KustomizeWriter) GenerateJSONPatch(updates []ResourceUpdate) ([]byte, e
 		if update.Limits != nil {
 			if update.Limits.CPU != nil {
 				patches = append(patches, JSONPatch{
-					Op:    jsonPatchReplace,
+					Op:    jsonPatchOpReplace,
 					Path:  fmt.Sprintf("/spec/template/spec/containers/%d/resources/limits/cpu", containerIndex),
 					Value: update.Limits.CPU.String(),
 				})
 			}
 			if update.Limits.Memory != nil {
 				patches = append(patches, JSONPatch{
-					Op:    jsonPatchReplace,
+					Op:    jsonPatchOpReplace,
 					Path:  fmt.Sprintf("/spec/template/spec/containers/%d/resources/limits/memory", containerIndex),
 					Value: update.Limits.Memory.String(),
 				})

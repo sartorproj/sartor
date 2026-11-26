@@ -27,6 +27,9 @@ import (
 const (
 	// notAvailable is the placeholder for unavailable values.
 	notAvailable = "N/A"
+
+	// resourcesKey is the YAML key holding container resource settings.
+	resourcesKey = "resources"
 )
 
 // ResourceUpdate contains the updated resource values for a container.
@@ -215,7 +218,7 @@ func updateContainer(f *yamlFile, containers *yaml.Node, update ResourceUpdate) 
 			continue
 		}
 
-		resources, err := f.ensureMapping(container, "resources")
+		resources, err := f.ensureMapping(container, resourcesKey)
 		if err != nil {
 			return err
 		}

@@ -399,6 +399,12 @@ spec:
                 description: NextAnalysisTime is when the next analysis is scheduled.
                 format: date-time
                 type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the metadata.generation of the spec that
+                  LastAnalysis was computed from. A newer generation forces re-analysis.
+                format: int64
+                type: integer
               prMessage:
                 description: PRMessage contains any error or status message.
                 type: string

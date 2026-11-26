@@ -81,7 +81,7 @@ func (r *TailoringReconciler) reconcileGitOps(
 
 	plan := writeback.BuildPlan(tailoring.Status.LastAnalysis.Containers, live, r.writeBackGuard(ctx, tailoring, atelier, logger))
 
-	ghCfg, err := loadGitHubConfig(ctx, r.secretReader(), atelier, r.ControllerNamespace)
+	ghCfg, err := loadGitHubConfig(ctx, r.Client, atelier, r.ControllerNamespace)
 	if err != nil {
 		logger.Error(err, "Failed to load Git credentials")
 		r.setCondition(tailoring, ConditionTypePRCreated, metav1.ConditionFalse, "GitCredentialsError", err.Error())

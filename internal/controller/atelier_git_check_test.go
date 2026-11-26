@@ -45,7 +45,7 @@ func TestAtelierGitConnectivityCheck(t *testing.T) {
 		wantReads     int
 	}{
 		{name: "flag off: no secret read, no Git call", enabled: false, secretNS: wbControllerNS, wantReason: "WriteBackDisabled"},
-		{name: "secret in another namespace is rejected unread", enabled: true, secretNS: "kube-system", wantReason: "ConnectionFailed"},
+		{name: "secret in another namespace is rejected unread", enabled: true, secretNS: "kube-system", wantReason: ReasonSecretNamespaceNotAllowed},
 		{name: "secret in controller namespace", enabled: true, secretNS: wbControllerNS, wantReason: "Connected", wantConnected: true, wantReads: 1},
 	}
 	for _, tt := range tests {
@@ -57,10 +57,10 @@ func TestAtelierGitConnectivityCheck(t *testing.T) {
 					&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "kube-system"}, Data: map[string][]byte{"token": []byte("x")}},
 				).
 				WithStatusSubresource(&autoscalingv1alpha1.Atelier{}).Build()
-			reader := &countingReader{Reader: c}
+			reader := &countingClient{Client: c}
 			git := fakegit.New("main", nil)
 			r := &AtelierReconciler{
-				Client: c, Scheme: c.Scheme(), APIReader: reader,
+				Client: reader, Scheme: c.Scheme(),
 				ControllerNamespace: wbControllerNS, EnableGitWriteBack: tt.enabled,
 				NewGitProvider: func(github.Config) (provider.Provider, error) { return git, nil },
 			}

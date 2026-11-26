@@ -53,29 +53,32 @@ const (
 	wbValues       = "api:\n  resources:\n    requests:\n      cpu: 100m # tuned\n      memory: 128Mi\n"
 )
 
-// countingReader records every Secret read so tests can assert none happened.
-type countingReader struct {
-	client.Reader
+// countingClient records every Secret read so tests can assert none happened.
+type countingClient struct {
+	client.Client
 	mu      sync.Mutex
 	secrets []string
 }
 
-func (c *countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+func (c *countingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 	if _, ok := obj.(*corev1.Secret); ok {
 		c.mu.Lock()
 		c.secrets = append(c.secrets, key.String())
 		c.mu.Unlock()
 	}
-	return c.Reader.Get(ctx, key, obj, opts...)
+	return c.Client.Get(ctx, key, obj, opts...)
 }
 
-func (c *countingReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
-	return fmt.Errorf("list is not allowed on the secret reader")
+func (c *countingClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*corev1.SecretList); ok {
+		return fmt.Errorf("listing Secrets is not allowed")
+	}
+	return c.Client.List(ctx, list, opts...)
 }
 
 type wbFixture struct {
 	reconciler *TailoringReconciler
-	reader     *countingReader
+	reader     *countingClient
 	git        *fakegit.Provider
 	factoryN   int
 	client     client.Client
@@ -162,14 +165,13 @@ func newWBFixture(t *testing.T, enabled bool, atelier *autoscalingv1alpha1.Ateli
 		WithStatusSubresource(&autoscalingv1alpha1.Tailoring{}).Build()
 
 	f := &wbFixture{
-		reader: &countingReader{Reader: c},
+		reader: &countingClient{Client: c},
 		git:    fakegit.New("main", map[string]string{wbValuesPath: wbValues}),
 		client: c,
 	}
 	f.reconciler = &TailoringReconciler{
-		Client:              c,
+		Client:              f.reader,
 		Scheme:              c.Scheme(),
-		APIReader:           f.reader,
 		ControllerNamespace: wbControllerNS,
 		EnableGitWriteBack:  enabled,
 		NewGitProvider: func(cfg github.Config) (provider.Provider, error) {
@@ -365,8 +367,8 @@ func TestWriteBackMarksMergedPR(t *testing.T) {
 	assert.Equal(t, "CooldownActive", reason(tl, ConditionTypeReady))
 }
 
-// fakePrometheus answers every instant query with one sample per container.
-func fakePrometheus() *httptest.Server {
+// fakeContainerPrometheus answers every instant query with one sample per container.
+func fakeContainerPrometheus() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		value := "0.15"
@@ -385,7 +387,7 @@ func fakePrometheus() *httptest.Server {
 func TestReconcilePausedNeverReachesGit(t *testing.T) {
 	for _, paused := range []bool{true, false} {
 		t.Run(fmt.Sprintf("paused=%v", paused), func(t *testing.T) {
-			prom := fakePrometheus()
+			prom := fakeContainerPrometheus()
 			defer prom.Close()
 
 			tl := wbTailoring("150m")

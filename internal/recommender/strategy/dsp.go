@@ -60,7 +60,7 @@ func NewDSPStrategy(sampleInterval time.Duration) *DSPStrategy {
 
 // Name returns the strategy name.
 func (s *DSPStrategy) Name() string {
-	return "dsp"
+	return StrategyNameDSP
 }
 
 // Calculate computes recommendations using DSP-based time series prediction.
@@ -96,7 +96,7 @@ func (s *DSPStrategy) calculateForContainer(
 ) (Recommendation, error) {
 	rec := Recommendation{
 		ContainerName: metrics.ContainerName,
-		Method:        "dsp",
+		Method:        StrategyNameDSP,
 		Metadata:      make(map[string]interface{}),
 	}
 
@@ -526,7 +526,7 @@ func (s *DSPStrategy) GetDefaultFitProfileSpec() FitProfileSpec {
 	}`), &paramsSchema)
 
 	return FitProfileSpec{
-		Strategy:          "dsp",
+		Strategy:          StrategyNameDSP,
 		DisplayName:       "DSP-based Time Series Prediction",
 		Description:       "Uses FFT and autocorrelation to detect periodic patterns and predict future usage",
 		ParametersSchema:  paramsSchema,

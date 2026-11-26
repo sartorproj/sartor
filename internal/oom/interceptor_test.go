@@ -45,6 +45,17 @@ func newFakeClient(objs ...client.Object) client.Client {
 		Build()
 }
 
+func tailoringFor(kind, name string, paused bool, excluded ...string) *autoscalingv1alpha1.Tailoring {
+	return &autoscalingv1alpha1.Tailoring{
+		ObjectMeta: metav1.ObjectMeta{Name: "t-" + name, Namespace: "default"},
+		Spec: autoscalingv1alpha1.TailoringSpec{
+			Target:            autoscalingv1alpha1.TargetRef{Kind: kind, Name: name},
+			Paused:            paused,
+			ExcludeContainers: excluded,
+		},
+	}
+}
+
 func TestNewInterceptor(t *testing.T) {
 	tests := []struct {
 		name                    string
@@ -516,7 +527,7 @@ func TestInterceptor_HandleOOMEvent_NilCurrentLimit(t *testing.T) {
 		},
 	}
 
-	fakeClient := newFakeClient(deployment)
+	fakeClient := newFakeClient(deployment, tailoringFor("Deployment", "my-deployment", false))
 	interceptor := NewInterceptor(fakeClient, InterceptorConfig{
 		MemoryIncreasePercent: 20,
 		Enabled:               true,
@@ -576,7 +587,7 @@ func TestInterceptor_HandleOOMEvent_DeploymentPatch(t *testing.T) {
 		},
 	}
 
-	fakeClient := newFakeClient(deployment)
+	fakeClient := newFakeClient(deployment, tailoringFor("Deployment", "my-deployment", false))
 	interceptor := NewInterceptor(fakeClient, InterceptorConfig{
 		MemoryIncreasePercent: 20,
 		Enabled:               true,
@@ -647,7 +658,7 @@ func TestInterceptor_HandleOOMEvent_StatefulSetPatch(t *testing.T) {
 		},
 	}
 
-	fakeClient := newFakeClient(statefulSet)
+	fakeClient := newFakeClient(statefulSet, tailoringFor("StatefulSet", "my-statefulset", false))
 	interceptor := NewInterceptor(fakeClient, InterceptorConfig{
 		MemoryIncreasePercent: 20,
 		Enabled:               true,
@@ -709,7 +720,7 @@ func TestInterceptor_HandleOOMEvent_DaemonSetPatch(t *testing.T) {
 		},
 	}
 
-	fakeClient := newFakeClient(daemonSet)
+	fakeClient := newFakeClient(daemonSet, tailoringFor("DaemonSet", "my-daemonset", false))
 	interceptor := NewInterceptor(fakeClient, InterceptorConfig{
 		MemoryIncreasePercent: 20,
 		Enabled:               true,
@@ -759,9 +770,10 @@ func TestInterceptor_HandleOOMEvent_UnsupportedOwnerKind(t *testing.T) {
 	ctx := context.Background()
 	result, err := interceptor.HandleOOMEvent(ctx, event)
 
-	assert.Error(t, err)
+	// Tailorings cannot target CronJobs, so the event is never acted on.
+	require.NoError(t, err)
 	assert.False(t, result.Success)
-	assert.Contains(t, result.Message, "unsupported owner kind")
+	assert.Contains(t, result.Message, "No Tailoring targets CronJob/my-cronjob")
 }
 
 func TestInterceptor_HandleOOMEvent_Cooldown(t *testing.T) {
@@ -794,7 +806,7 @@ func TestInterceptor_HandleOOMEvent_Cooldown(t *testing.T) {
 		},
 	}
 
-	fakeClient := newFakeClient(deployment)
+	fakeClient := newFakeClient(deployment, tailoringFor("Deployment", "my-deployment", false))
 	interceptor := NewInterceptor(fakeClient, InterceptorConfig{
 		MemoryIncreasePercent: 20,
 		Enabled:               true,
@@ -855,7 +867,7 @@ func TestInterceptor_HandleOOMEvent_ExpiredCooldown(t *testing.T) {
 		},
 	}
 
-	fakeClient := newFakeClient(deployment)
+	fakeClient := newFakeClient(deployment, tailoringFor("Deployment", "my-deployment", false))
 	interceptor := NewInterceptor(fakeClient, InterceptorConfig{
 		MemoryIncreasePercent: 20,
 		Enabled:               true,
@@ -948,7 +960,7 @@ func TestInterceptor_FindTailoring(t *testing.T) {
 }
 
 func TestInterceptor_DeploymentNotFound(t *testing.T) {
-	fakeClient := newFakeClient() // Empty client, no deployment
+	fakeClient := newFakeClient(tailoringFor("Deployment", "non-existent-deployment", false)) // No deployment
 	interceptor := NewInterceptor(fakeClient, InterceptorConfig{
 		MemoryIncreasePercent: 20,
 		Enabled:               true,

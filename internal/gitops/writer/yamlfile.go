@@ -39,9 +39,8 @@ import (
 // keys must be inserted, the node tree is re-encoded using the indentation
 // detected in the original file; comments are kept but blank lines may be lost.
 const (
-	tagMap           = "!!map"
-	tagStr           = "!!str"
-	jsonPatchReplace = "replace"
+	tagMap = "!!map"
+	tagStr = "!!str"
 )
 
 type yamlFile struct {

@@ -28,6 +28,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var testWorkload = Workload{Kind: KindDeployment, Name: "test"}
+
 func TestNewClient(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -92,20 +94,11 @@ func TestNewClient(t *testing.T) {
 func TestClient_CheckConnection(t *testing.T) {
 	t.Run("successful connection", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Prometheus /api/v1/status/config endpoint
-			if r.URL.Path == "/api/v1/status/config" {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				config := map[string]interface{}{
-					"status": "success",
-					"data": map[string]interface{}{
-						"yaml": "global:\n  scrape_interval: 15s\n",
-					},
-				}
-				_ = json.NewEncoder(w).Encode(config)
-			} else {
-				w.WriteHeader(http.StatusNotFound)
+			if r.URL.Path == "/api/v1/query" && r.FormValue("query") == "vector(1)" {
+				writeVector(w, sample{value: "1"})
+				return
 			}
+			w.WriteHeader(http.StatusNotFound)
 		}))
 		defer server.Close()
 
@@ -130,6 +123,34 @@ func TestClient_CheckConnection(t *testing.T) {
 		err = client.CheckConnection(ctx)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to connect to Prometheus")
+	})
+
+	t.Run("status/config not served (VictoriaMetrics) still connects", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/status/config" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			writeVector(w, sample{value: "1"})
+		}))
+		defer server.Close()
+
+		client, err := NewClient(Config{URL: server.URL})
+		require.NoError(t, err)
+		assert.NoError(t, client.CheckConnection(context.Background()))
+	})
+
+	t.Run("unexpected vector(1) result", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeVector(w)
+		}))
+		defer server.Close()
+
+		client, err := NewClient(Config{URL: server.URL})
+		require.NoError(t, err)
+		err = client.CheckConnection(context.Background())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unexpected response")
 	})
 }
 
@@ -166,7 +187,7 @@ func TestClient_GetContainerMetrics(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	metrics, err := client.GetContainerMetrics(ctx, "default", "test-pod", time.Hour)
+	metrics, err := client.GetContainerMetrics(ctx, "default", testWorkload, time.Hour)
 
 	require.NoError(t, err)
 	assert.NotEmpty(t, metrics)
@@ -180,7 +201,7 @@ func TestClient_GetContainerMetrics_ConnectionError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	metrics, err := client.GetContainerMetrics(ctx, "default", "test-pod", time.Hour)
+	metrics, err := client.GetContainerMetrics(ctx, "default", testWorkload, time.Hour)
 
 	// Should fail due to connection error
 	assert.Error(t, err)
@@ -225,19 +246,19 @@ func TestClient_GetTimeSeriesMetrics(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("cpu metrics", func(t *testing.T) {
-		points, err := client.GetTimeSeriesMetrics(ctx, "default", "test-pod", "app", "cpu", time.Hour)
+		points, err := client.GetTimeSeriesMetrics(ctx, "default", testWorkload, "app", "cpu", time.Hour)
 		require.NoError(t, err)
 		assert.NotEmpty(t, points)
 	})
 
 	t.Run("memory metrics", func(t *testing.T) {
-		points, err := client.GetTimeSeriesMetrics(ctx, "default", "test-pod", "app", "memory", time.Hour)
+		points, err := client.GetTimeSeriesMetrics(ctx, "default", testWorkload, "app", "memory", time.Hour)
 		require.NoError(t, err)
 		assert.NotEmpty(t, points)
 	})
 
 	t.Run("unsupported resource type", func(t *testing.T) {
-		_, err := client.GetTimeSeriesMetrics(ctx, "default", "test-pod", "app", "unsupported", time.Hour)
+		_, err := client.GetTimeSeriesMetrics(ctx, "default", testWorkload, "app", "unsupported", time.Hour)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported resource type")
 	})
@@ -264,7 +285,7 @@ func TestClient_GetTimeSeriesMetrics_ShortWindow(t *testing.T) {
 
 	ctx := context.Background()
 	// Use very short window to test step calculation
-	points, err := client.GetTimeSeriesMetrics(ctx, "default", "test-pod", "app", "cpu", time.Second*10)
+	points, err := client.GetTimeSeriesMetrics(ctx, "default", testWorkload, "app", "cpu", time.Second*10)
 	require.NoError(t, err)
 	assert.Empty(t, points)
 }
@@ -277,17 +298,19 @@ func TestFormatDuration(t *testing.T) {
 		{30 * time.Second, "30s"},
 		{time.Minute, "1m"},
 		{5 * time.Minute, "5m"},
+		{90 * time.Second, "90s"},
 		{time.Hour, "1h"},
 		{2 * time.Hour, "2h"},
+		{90 * time.Minute, "90m"},
 		{24 * time.Hour, "1d"},
+		{36 * time.Hour, "36h"},
 		{48 * time.Hour, "2d"},
-		{7 * 24 * time.Hour, "7d"},
+		{168 * time.Hour, "7d"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
-			result := formatDuration(tt.duration)
-			assert.Equal(t, tt.expected, result)
+			assert.Equal(t, tt.expected, formatDuration(tt.duration))
 		})
 	}
 }
@@ -428,7 +451,7 @@ func TestClient_QueryAndExtract_UnexpectedResultType(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	metrics, err := client.GetContainerMetrics(ctx, "default", "test-pod", time.Hour)
+	metrics, err := client.GetContainerMetrics(ctx, "default", testWorkload, time.Hour)
 
 	// Should return error due to unexpected result type
 	assert.Error(t, err)
@@ -456,7 +479,7 @@ func TestClient_GetTimeSeriesMetrics_UnexpectedResultType(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	points, err := client.GetTimeSeriesMetrics(ctx, "default", "test-pod", "app", "cpu", time.Hour)
+	points, err := client.GetTimeSeriesMetrics(ctx, "default", testWorkload, "app", "cpu", time.Hour)
 
 	// Should return error due to unexpected result type
 	assert.Error(t, err)
@@ -483,7 +506,7 @@ func TestClient_GetContainerMetrics_EmptyResults(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	metrics, err := client.GetContainerMetrics(ctx, "default", "test-pod", time.Hour)
+	metrics, err := client.GetContainerMetrics(ctx, "default", testWorkload, time.Hour)
 
 	require.NoError(t, err)
 	assert.Empty(t, metrics)
@@ -526,7 +549,7 @@ func TestClient_GetContainerMetrics_EmptyContainerName(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	metrics, err := client.GetContainerMetrics(ctx, "default", "test-pod", time.Hour)
+	metrics, err := client.GetContainerMetrics(ctx, "default", testWorkload, time.Hour)
 
 	require.NoError(t, err)
 	// Should only contain the container with non-empty name
@@ -562,7 +585,7 @@ func TestClient_GetContainerMetrics_WithWarnings(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	metrics, err := client.GetContainerMetrics(ctx, "default", "test-pod", time.Hour)
+	metrics, err := client.GetContainerMetrics(ctx, "default", testWorkload, time.Hour)
 
 	// Should succeed despite warnings
 	require.NoError(t, err)
@@ -598,7 +621,7 @@ func TestClient_GetTimeSeriesMetrics_MemoryConversion(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	points, err := client.GetTimeSeriesMetrics(ctx, "default", "test-pod", "app", "memory", time.Hour)
+	points, err := client.GetTimeSeriesMetrics(ctx, "default", testWorkload, "app", "memory", time.Hour)
 
 	require.NoError(t, err)
 	assert.Len(t, points, 1)
@@ -613,7 +636,7 @@ func TestClient_GetTimeSeriesMetrics_ConnectionError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	points, err := client.GetTimeSeriesMetrics(ctx, "default", "test-pod", "app", "cpu", time.Hour)
+	points, err := client.GetTimeSeriesMetrics(ctx, "default", testWorkload, "app", "cpu", time.Hour)
 
 	assert.Error(t, err)
 	assert.Nil(t, points)
@@ -669,13 +692,13 @@ func TestClient_Integration(t *testing.T) {
 	})
 
 	t.Run("GetContainerMetrics", func(t *testing.T) {
-		metrics, err := client.GetContainerMetrics(ctx, "default", "test", 24*time.Hour)
+		metrics, err := client.GetContainerMetrics(ctx, "default", Workload{Kind: KindDeployment, Name: "test"}, 24*time.Hour)
 		require.NoError(t, err)
 		t.Logf("Found %d containers", len(metrics))
 	})
 
 	t.Run("GetTimeSeriesMetrics", func(t *testing.T) {
-		points, err := client.GetTimeSeriesMetrics(ctx, "default", "test", "app", "cpu", time.Hour)
+		points, err := client.GetTimeSeriesMetrics(ctx, "default", Workload{Kind: KindDeployment, Name: "test"}, "app", "cpu", time.Hour)
 		require.NoError(t, err)
 		t.Logf("Found %d data points", len(points))
 	})

@@ -22,8 +22,6 @@ import (
 	"strconv"
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	autoscalingv1alpha1 "github.com/sartorproj/sartor/api/v1alpha1"
@@ -49,11 +47,10 @@ func DefaultGitProviderFactory(cfg github.Config) (provider.Provider, error) {
 
 // loadGitHubConfig reads the Git credentials Secret referenced by the Atelier.
 //
-// The Secret is fetched with a single GET through reader, which must not be
-// backed by an informer (use the manager's APIReader), and only from
-// controllerNamespace: the controller is granted "get" on Secrets in its own
-// namespace and nothing else, so a secretRef elsewhere is rejected before any
-// API call.
+// The Secret is fetched with a single GET and only from controllerNamespace
+// (see getCredentialSecret): the controller is granted "get" on Secrets in its
+// own namespace and nothing else, so a secretRef elsewhere is rejected before
+// any API call.
 func loadGitHubConfig(
 	ctx context.Context,
 	reader client.Reader,
@@ -64,16 +61,18 @@ func loadGitHubConfig(
 	if gp.Type != autoscalingv1alpha1.GitProviderGitHub {
 		return github.Config{}, fmt.Errorf("git provider %q is not supported yet (only github)", gp.Type)
 	}
+	if gp.SecretRef.Name == "" {
+		return github.Config{}, fmt.Errorf("gitProvider.secretRef.name is required")
+	}
 
-	ns, err := gitSecretNamespace(gp.SecretRef, controllerNamespace)
+	secret, err := getCredentialSecret(ctx, reader, controllerNamespace, gp.SecretRef)
 	if err != nil {
-		return github.Config{}, err
+		if IsSecretNamespaceError(err) {
+			return github.Config{}, err
+		}
+		return github.Config{}, fmt.Errorf("failed to get Git provider secret %s/%s: %w", controllerNamespace, gp.SecretRef.Name, err)
 	}
-
-	secret := &corev1.Secret{}
-	if err := reader.Get(ctx, types.NamespacedName{Name: gp.SecretRef.Name, Namespace: ns}, secret); err != nil {
-		return github.Config{}, fmt.Errorf("failed to get Git provider secret %s/%s: %w", ns, gp.SecretRef.Name, err)
-	}
+	ns := secret.Namespace
 
 	cfg := github.Config{BaseURL: gp.BaseURL}
 	if token := strings.TrimSpace(string(secret.Data[gitSecretKeyToken])); token != "" {
@@ -99,20 +98,4 @@ func loadGitHubConfig(
 		return github.Config{}, fmt.Errorf("git provider secret %s/%s: %w", ns, gp.SecretRef.Name, err)
 	}
 	return cfg, nil
-}
-
-// gitSecretNamespace resolves the namespace of the Git credentials Secret and
-// rejects any namespace other than the controller's own.
-func gitSecretNamespace(ref corev1.SecretReference, controllerNamespace string) (string, error) {
-	if ref.Name == "" {
-		return "", fmt.Errorf("gitProvider.secretRef.name is required")
-	}
-	if controllerNamespace == "" {
-		return "", fmt.Errorf("controller namespace is unknown (set POD_NAMESPACE); refusing to read Git credentials")
-	}
-	if ref.Namespace != "" && ref.Namespace != controllerNamespace {
-		return "", fmt.Errorf("gitProvider.secretRef.namespace %q is not allowed: the Secret must be in the controller namespace %q",
-			ref.Namespace, controllerNamespace)
-	}
-	return controllerNamespace, nil
 }

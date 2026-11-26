@@ -33,8 +33,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	autoscalingv1alpha1 "github.com/sartorproj/sartor/api/v1alpha1"
 	"github.com/sartorproj/sartor/internal/metrics/prometheus"
@@ -57,10 +59,11 @@ const (
 	// SartorIgnoreLabel is the label that indicates the PR should be ignored.
 	SartorIgnoreLabel = "sartor-ignore"
 
-	// DefaultRequeueInterval is the default interval between reconciliations.
-	DefaultRequeueInterval = 30 * time.Second // Reduced for testing
-	// AnalysisRequeueInterval is the interval after a successful analysis.
-	AnalysisRequeueInterval = 1 * time.Minute // Reduced for testing (was 1 hour)
+	// DefaultRequeueInterval is the retry interval after a failed reconciliation.
+	DefaultRequeueInterval = 5 * time.Minute
+	// DefaultAnalysisInterval is the default minimum time between analyses of
+	// an unchanged Tailoring (--analysis-interval).
+	DefaultAnalysisInterval = 6 * time.Hour
 	// PRCheckInterval is the interval to check PR status.
 	PRCheckInterval = 5 * time.Minute
 )
@@ -70,16 +73,60 @@ type TailoringReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// APIReader reads Secrets straight from the API server, without an informer.
-	// Falls back to Client when nil.
-	APIReader client.Reader
-	// ControllerNamespace is the only namespace Git credentials are read from.
+	// AnalysisInterval is the minimum time between analyses of a Tailoring
+	// whose spec has not changed. Defaults to DefaultAnalysisInterval.
+	AnalysisInterval time.Duration
+
+	// ControllerNamespace is the only namespace credential Secrets are read from.
 	ControllerNamespace string
-	// EnableGitWriteBack allows opening and updating pull requests. When false
-	// the controller never contacts the Git provider.
+
+	// EnableGitWriteBack allows the controller to push changes and open PRs
+	// (--enable-git-writeback). When false the controller never touches git.
 	EnableGitWriteBack bool
+
 	// NewGitProvider creates the Git provider; defaults to DefaultGitProviderFactory.
 	NewGitProvider GitProviderFactory
+
+	// now returns the current time; overridable in tests.
+	now func() time.Time
+}
+
+// analysisInterval returns the configured analysis interval or the default.
+func (r *TailoringReconciler) analysisInterval() time.Duration {
+	if r.AnalysisInterval > 0 {
+		return r.AnalysisInterval
+	}
+	return DefaultAnalysisInterval
+}
+
+func (r *TailoringReconciler) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// analysisDueIn returns how long until the Tailoring needs a new analysis.
+// It is zero when there is no previous analysis, the spec changed since the
+// last analysis (generation differs), or the last analysis is older than the
+// analysis interval.
+func (r *TailoringReconciler) analysisDueIn(tailoring *autoscalingv1alpha1.Tailoring) time.Duration {
+	last := tailoring.Status.LastAnalysis
+	if last == nil || last.Timestamp.IsZero() {
+		return 0
+	}
+	if tailoring.Status.ObservedGeneration != tailoring.Generation {
+		return 0
+	}
+	remaining := r.analysisInterval() - r.clock().Sub(last.Timestamp.Time)
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining > r.analysisInterval() {
+		// Timestamp in the future (clock skew): wait at most one interval.
+		return r.analysisInterval()
+	}
+	return remaining
 }
 
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=tailorings,verbs=get;list;watch;create;update;patch;delete
@@ -88,7 +135,7 @@ type TailoringReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=ateliers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=autoscaling,resources=verticalpodautoscalers,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch
 
 // Reconcile implements the reconciliation loop for Tailoring resources.
@@ -102,6 +149,11 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	if dueIn := r.analysisDueIn(tailoring); dueIn > 0 {
+		logger.V(1).Info("Last analysis is fresh, skipping", "name", tailoring.Name, "namespace", tailoring.Namespace, "nextAnalysisIn", dueIn)
+		return ctrl.Result{RequeueAfter: dueIn}, nil
 	}
 
 	logger.Info("Reconciling Tailoring", "name", tailoring.Name, "namespace", tailoring.Namespace)
@@ -137,7 +189,11 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	promConfig, err := r.buildPrometheusConfig(ctx, atelier)
 	if err != nil {
 		logger.Error(err, "Failed to build Prometheus config")
-		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "PrometheusConfigError", err.Error())
+		reason := "PrometheusConfigError"
+		if IsSecretNamespaceError(err) {
+			reason = ReasonSecretNamespaceNotAllowed
+		}
+		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, reason, err.Error())
 	}
 
 	// Create Prometheus client
@@ -156,7 +212,10 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Query Prometheus for metrics
-	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.Namespace, tailoring.Spec.Target.Name, analysisWindow)
+	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.Namespace, prometheus.Workload{
+		Kind: tailoring.Spec.Target.Kind,
+		Name: tailoring.Spec.Target.Name,
+	}, analysisWindow)
 	if err != nil {
 		logger.Error(err, "Failed to get container metrics")
 		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "MetricsQueryError", err.Error())
@@ -209,29 +268,36 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Update analysis result in status (include current resources for comparison)
 	analysisResult := r.buildAnalysisResult(metrics, legacyRecommendations, currentResources, analysisWindow)
+	analysisResult.Timestamp = metav1.NewTime(r.clock())
 	tailoring.Status.LastAnalysis = &analysisResult
-	tailoring.Status.NextAnalysisTime = &metav1.Time{Time: time.Now().Add(AnalysisRequeueInterval)}
+	tailoring.Status.ObservedGeneration = tailoring.Generation
+	tailoring.Status.NextAnalysisTime = &metav1.Time{Time: analysisResult.Timestamp.Add(r.analysisInterval())}
 	r.setCondition(tailoring, ConditionTypeAnalyzed, metav1.ConditionTrue, "AnalysisComplete", "Resource analysis completed")
 
 	// Check if Tailoring is paused (dry-run mode)
 	if tailoring.Spec.Paused {
 		logger.Info("Tailoring is paused, skipping Cut creation")
 		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "Paused", "Tailoring is paused, recommendations calculated but no Cut created")
-		if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-			logger.Error(updateErr, "Failed to update status")
-			return ctrl.Result{}, updateErr
-		}
-		return ctrl.Result{RequeueAfter: AnalysisRequeueInterval}, nil
+		return r.updateStatusAndRequeue(ctx, tailoring, logger)
 	}
 
 	r.reconcileGitOps(ctx, tailoring, atelier, currentResources, logger)
+	return r.updateStatusAndRequeue(ctx, tailoring, logger)
+}
 
-	if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
-		logger.Error(updateErr, "Failed to update status")
-		return ctrl.Result{}, updateErr
+// updateStatusAndRequeue persists the status after an analysis and schedules
+// the next one. The status write itself does not trigger a reconcile because
+// the controller only reacts to generation (spec) changes.
+func (r *TailoringReconciler) updateStatusAndRequeue(
+	ctx context.Context,
+	tailoring *autoscalingv1alpha1.Tailoring,
+	logger logr.Logger,
+) (ctrl.Result, error) {
+	if err := r.Status().Update(ctx, tailoring); err != nil {
+		logger.Error(err, "Failed to update status")
+		return ctrl.Result{}, err
 	}
-
-	return ctrl.Result{RequeueAfter: AnalysisRequeueInterval}, nil
+	return ctrl.Result{RequeueAfter: r.analysisInterval()}, nil
 }
 
 // handleReconcileError handles an error during reconciliation by updating the status and returning the appropriate result.
@@ -346,14 +412,6 @@ func (r *TailoringReconciler) getTargetResources(ctx context.Context, tailoring 
 	return resources, nil
 }
 
-// secretReader returns the reader used for Secrets.
-func (r *TailoringReconciler) secretReader() client.Reader {
-	if r.APIReader != nil {
-		return r.APIReader
-	}
-	return r.Client
-}
-
 func quantityString(q *resource.Quantity) string {
 	if q == nil {
 		return ""
@@ -402,12 +460,8 @@ func (r *TailoringReconciler) buildPrometheusConfig(ctx context.Context, atelier
 	}
 
 	if atelier.Spec.Prometheus.SecretRef != nil {
-		secret := &corev1.Secret{}
-		secretKey := types.NamespacedName{
-			Name:      atelier.Spec.Prometheus.SecretRef.Name,
-			Namespace: atelier.Spec.Prometheus.SecretRef.Namespace,
-		}
-		if err := r.Get(ctx, secretKey, secret); err != nil {
+		secret, err := getCredentialSecret(ctx, r.Client, r.ControllerNamespace, *atelier.Spec.Prometheus.SecretRef)
+		if err != nil {
 			return config, fmt.Errorf("failed to get Prometheus secret: %w", err)
 		}
 
@@ -481,7 +535,7 @@ func (r *TailoringReconciler) resolveFitProfile(
 	}, fitProfile); err != nil {
 		logger.Error(err, "Failed to get FitProfile")
 		// Return defaults - this will cause an error downstream but we'll handle it gracefully
-		return "percentile", make(map[string]interface{}), false, false, nil
+		return strategy.StrategyNamePercentile, make(map[string]interface{}), false, false, nil
 	}
 
 	// Extract parameters from FitProfile
@@ -604,10 +658,17 @@ func (r *TailoringReconciler) setCondition(tailoring *autoscalingv1alpha1.Tailor
 	meta.SetStatusCondition(&tailoring.Status.Conditions, condition)
 }
 
+// tailoringPredicates filters Tailoring events: only creation, deletion and
+// spec changes (metadata.generation bumps) trigger a reconcile, so the
+// controller's own status writes do not re-run the analysis.
+func tailoringPredicates() predicate.Predicate {
+	return predicate.GenerationChangedPredicate{}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *TailoringReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&autoscalingv1alpha1.Tailoring{}).
+		For(&autoscalingv1alpha1.Tailoring{}, builder.WithPredicates(tailoringPredicates())).
 		Named("tailoring").
 		Complete(r)
 }

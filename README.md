@@ -41,7 +41,7 @@ See [Not yet supported](#not-yet-supported) for features that are defined in the
 ### Prerequisites
 
 - Kubernetes cluster
-- Prometheus-compatible metrics (Prometheus, VictoriaMetrics, Thanos, ...) with cAdvisor container metrics
+- Prometheus-compatible metrics (Prometheus, VictoriaMetrics, Thanos, ...) with cAdvisor container metrics (kube-state-metrics recommended)
 - A GitHub repository holding your manifests (only needed for write-back)
 - kubectl configured to access your cluster
 
@@ -138,13 +138,15 @@ More samples live in [config/samples](config/samples).
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--enable-git-writeback` | `false` | Open and update pull requests. When `false`, Sartor never reads Git credentials or calls the Git provider. |
-| `--analysis-interval` | `6h` | How often each Tailoring is re-analyzed. |
-| `--enable-oom-patching` | `false` | Raise memory limits of OOMKilled containers. Only workloads with a non-paused Tailoring are touched. |
+| `--analysis-interval` | `6h` | How often each Tailoring is re-analyzed (and its pull request refreshed). Status-only updates never trigger analysis; spec changes trigger it immediately. |
+| `--enable-oom-patching` | `false` | Registers the OOM controller. When off, Sartor does not watch Pods and never patches workloads. When on, it patches only workloads targeted by a non-paused Tailoring, skips excluded containers, and handles each OOM once per cooldown. |
 | `--leader-elect` | `false` | Enable leader election (use it with more than one replica). |
 | `--metrics-bind-address` | `0` | Metrics endpoint address (`0` disables it). |
 | `--health-probe-bind-address` | `:8081` | Health and readiness probe address. |
 
-The controller reads Secrets (Git, Prometheus and ArgoCD credentials) with a direct API call and only from its own namespace, taken from the `POD_NAMESPACE` environment variable. A `secretRef` that points to another namespace is rejected. RBAC therefore only needs `get` on Secrets in that namespace.
+The controller reads Secrets (Git, Prometheus and ArgoCD credentials) directly from the API server and only from its own namespace (`POD_NAMESPACE`, falling back to the service account namespace). A `secretRef` that points to another namespace is rejected without reading the Secret and reported in the Atelier's `SecretRefsValid` condition. RBAC therefore only needs `get` on Secrets in that namespace.
+
+The API server (`cmd/server`) sends no CORS headers by default; the UI calls it same-origin through its proxy. Use `--cors-allowed-origins=https://ui.example.com` (comma-separated, `*` only if set explicitly) to allow cross-origin browsers.
 
 ## Prometheus and VictoriaMetrics
 
@@ -162,7 +164,9 @@ spec:
       namespace: sartor-system
 ```
 
-The connection check uses an endpoint that vmselect serves, so `status.prometheusConnected` is accurate for VictoriaMetrics too.
+The connectivity check runs the instant query `vector(1)`, which works on Prometheus, VictoriaMetrics single-node and vmselect.
+
+**Pod matching**: Metrics are matched to a workload's pods with kind-specific, anchored pod name patterns (for example `<name>-<hash>-<suffix>` for Deployments and `<name>-<ordinal>` for StatefulSets), so `backend` never picks up pods of `backend-cron`. When kube-state-metrics is present (`kube_pod_owner`, `kube_replicaset_owner`), pods are matched by their owner instead. Usage is aggregated with `max` across all pods of the workload.
 
 ## Git Write-Back
 
