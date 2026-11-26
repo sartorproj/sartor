@@ -857,29 +857,120 @@ func TestAuthMiddleware_SkipHealthEndpoints(t *testing.T) {
 }
 
 func TestCORSMiddleware(t *testing.T) {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	middleware := CORSMiddleware(handler)
+	tests := []struct {
+		name        string
+		origins     []string
+		method      string
+		origin      string
+		preflight   bool
+		wantStatus  int
+		wantAllowed string
+	}{
+		{"allowed origin GET", []string{"https://ui.example.com"}, http.MethodGet, "https://ui.example.com", false, http.StatusOK, "https://ui.example.com"},
+		{"allowed origin with trailing slash in config", []string{"https://ui.example.com/"}, http.MethodGet, "https://ui.example.com", false, http.StatusOK, "https://ui.example.com"},
+		{"disallowed origin GET gets no CORS headers", []string{"https://ui.example.com"}, http.MethodGet, "https://evil.example.com", false, http.StatusOK, ""},
+		{"same-origin request without Origin", []string{"https://ui.example.com"}, http.MethodGet, "", false, http.StatusOK, ""},
+		{"allowed preflight", []string{"https://ui.example.com"}, http.MethodOptions, "https://ui.example.com", true, http.StatusNoContent, "https://ui.example.com"},
+		{"disallowed preflight", []string{"https://ui.example.com"}, http.MethodOptions, "https://evil.example.com", true, http.StatusNoContent, ""},
+		{"explicit wildcard", []string{"*"}, http.MethodGet, "https://any.example.com", false, http.StatusOK, "*"},
+		{"no origins configured", nil, http.MethodGet, "https://ui.example.com", false, http.StatusOK, ""},
+		{"non-preflight OPTIONS passes through", []string{"https://ui.example.com"}, http.MethodOptions, "https://ui.example.com", false, http.StatusOK, "https://ui.example.com"},
+	}
 
-	t.Run("adds CORS headers", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
-		rec := httptest.NewRecorder()
-		middleware.ServeHTTP(rec, req)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/api/v1/test", nil)
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if tt.preflight {
+				req.Header.Set("Access-Control-Request-Method", "GET")
+				req.Header.Set("Access-Control-Request-Headers", "x-api-key")
+			}
+			rec := httptest.NewRecorder()
+			CORSMiddleware(tt.origins, ok).ServeHTTP(rec, req)
 
-		assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
-		assert.Contains(t, rec.Header().Get("Access-Control-Allow-Methods"), "GET")
-		assert.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "X-API-Key")
+			assert.Equal(t, tt.wantStatus, rec.Code)
+			assert.Equal(t, tt.wantAllowed, rec.Header().Get("Access-Control-Allow-Origin"))
+			if tt.wantAllowed != "" {
+				assert.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "X-API-Key")
+				assert.Contains(t, rec.Header().Get("Access-Control-Allow-Methods"), "GET")
+			}
+		})
+	}
+}
+
+func TestWrapHandler_CORSOutsideAuth(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
 	})
+	keys := map[string]bool{"k1": true}
+	origins := []string{"https://ui.example.com"}
 
-	t.Run("handles OPTIONS preflight", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodOptions, "/api/v1/test", nil)
+	tests := []struct {
+		name        string
+		keys        map[string]bool
+		method      string
+		preflight   bool
+		apiKey      string
+		wantStatus  int
+		wantAllowed string
+	}{
+		{"preflight without key is not rejected by auth", keys, http.MethodOptions, true, "", http.StatusNoContent, "https://ui.example.com"},
+		{"GET without key is rejected but readable cross-origin", keys, http.MethodGet, false, "", http.StatusUnauthorized, "https://ui.example.com"},
+		{"GET with wrong key", keys, http.MethodGet, false, "nope", http.StatusForbidden, "https://ui.example.com"},
+		{"GET with key", keys, http.MethodGet, false, "k1", http.StatusOK, "https://ui.example.com"},
+		{"non-preflight OPTIONS still needs a key", keys, http.MethodOptions, false, "", http.StatusUnauthorized, "https://ui.example.com"},
+		{"no keys configured", nil, http.MethodGet, false, "", http.StatusOK, "https://ui.example.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/api/v1/tailorings", nil)
+			req.Header.Set("Origin", "https://ui.example.com")
+			if tt.preflight {
+				req.Header.Set("Access-Control-Request-Method", "GET")
+			}
+			if tt.apiKey != "" {
+				req.Header.Set("X-API-Key", tt.apiKey)
+			}
+			rec := httptest.NewRecorder()
+			WrapHandler(ok, tt.keys, origins).ServeHTTP(rec, req)
+			assert.Equal(t, tt.wantStatus, rec.Code)
+			assert.Equal(t, tt.wantAllowed, rec.Header().Get("Access-Control-Allow-Origin"))
+		})
+	}
+
+	t.Run("no CORS by default", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/tailorings", nil)
+		req.Header.Set("Origin", "https://evil.example.com")
+		req.Header.Set("X-API-Key", "k1")
 		rec := httptest.NewRecorder()
-		middleware.ServeHTTP(rec, req)
-
+		WrapHandler(ok, keys, ParseOrigins("")).ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
 	})
+}
+
+func TestParseOrigins(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{" , ", nil},
+		{"https://a.example.com", []string{"https://a.example.com"}},
+		{"https://a.example.com, https://b.example.com,", []string{"https://a.example.com", "https://b.example.com"}},
+		{"*", []string{"*"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			assert.Equal(t, tt.want, ParseOrigins(tt.in))
+		})
+	}
 }
 
 func TestResponse_JSON(t *testing.T) {

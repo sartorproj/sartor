@@ -55,11 +55,16 @@ func main() {
 	var apiKeySecretName string
 	var apiKeySecretNamespace string
 	var enableCORS bool
+	var corsAllowedOrigins string
 
 	flag.StringVar(&addr, "addr", ":8080", "The address the server binds to.")
 	flag.StringVar(&apiKeySecretName, "api-key-secret-name", "sartor-api-keys", "Name of the Secret containing API keys.")
 	flag.StringVar(&apiKeySecretNamespace, "api-key-secret-namespace", "sartor-system", "Namespace of the API key Secret.")
-	flag.BoolVar(&enableCORS, "enable-cors", true, "Enable CORS headers for browser access.")
+	flag.BoolVar(&enableCORS, "enable-cors", false,
+		"Deprecated: CORS is enabled by setting --cors-allowed-origins.")
+	flag.StringVar(&corsAllowedOrigins, "cors-allowed-origins", "",
+		"Comma-separated origins allowed to call the API cross-origin (e.g. https://sartor.example.com). "+
+			"Empty (default) disables CORS; serve the UI same-origin instead. Use \"*\" to allow any origin.")
 
 	opts := zap.Options{
 		Development: true,
@@ -117,18 +122,11 @@ func main() {
 		_, _ = fmt.Fprint(w, `{"error": "not implemented", "message": "MCP server will be available in Phase 4"}`)
 	})
 
-	// Apply middleware
-	var handler http.Handler = mux
-
-	// Add CORS if enabled
-	if enableCORS {
-		handler = api.CORSMiddleware(handler)
+	origins := api.ParseOrigins(corsAllowedOrigins)
+	if enableCORS && len(origins) == 0 {
+		setupLog.Info("--enable-cors has no effect without --cors-allowed-origins; CORS stays disabled")
 	}
-
-	// Add authentication if API keys are configured
-	if len(apiKeys) > 0 {
-		handler = api.AuthMiddleware(apiKeys, handler)
-	}
+	handler := api.WrapHandler(mux, apiKeys, origins)
 
 	// Create server
 	server := &http.Server{
@@ -141,7 +139,7 @@ func main() {
 
 	// Start server in goroutine
 	go func() {
-		setupLog.Info("starting server", "addr", addr, "cors", enableCORS, "auth", len(apiKeys) > 0)
+		setupLog.Info("starting server", "addr", addr, "corsAllowedOrigins", origins, "auth", len(apiKeys) > 0)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			setupLog.Error(err, "server failed")
 			os.Exit(1)

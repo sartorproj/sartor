@@ -20,7 +20,11 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"math"
 	"net/http"
+	"net/url"
+	"slices"
+	"sort"
 	"time"
 
 	"github.com/prometheus/client_golang/api"
@@ -71,6 +75,7 @@ type basicAuthRoundTripper struct {
 }
 
 func (b *basicAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
 	req.SetBasicAuth(b.username, b.password)
 	return b.rt.RoundTrip(req)
 }
@@ -82,36 +87,75 @@ type bearerAuthRoundTripper struct {
 }
 
 func (b *bearerAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
 	req.Header.Set("Authorization", "Bearer "+b.token)
 	return b.rt.RoundTrip(req)
 }
 
-// NewClient creates a new Prometheus client.
+// queryParamsRoundTripper adds the query parameters of the configured URL
+// (e.g. VictoriaMetrics' ?extra_label=cluster=example-cluster) to every request.
+// They are sent once in the URL, also for POST requests whose form body
+// carries the PromQL parameters.
+type queryParamsRoundTripper struct {
+	params url.Values
+	rt     http.RoundTripper
+}
+
+func (q *queryParamsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	values := req.URL.Query()
+	for key, vals := range q.params {
+		for _, v := range vals {
+			if !slices.Contains(values[key], v) {
+				values.Add(key, v)
+			}
+		}
+	}
+	req.URL.RawQuery = values.Encode()
+	return q.rt.RoundTrip(req)
+}
+
+// NewClient creates a new Prometheus-compatible client.
+//
+// The URL may carry a path prefix (e.g. VictoriaMetrics vmselect
+// "/select/0/prometheus") and a query string; both are applied to every API
+// request. Basic auth is used when Username is set, otherwise a bearer token
+// when Token is set.
 func NewClient(cfg Config) (*Client, error) {
+	endpoint, err := url.Parse(cfg.URL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Prometheus URL: %w", err)
+	}
+	params := endpoint.Query()
+	endpoint.RawQuery = ""
+	endpoint.Fragment = ""
+
 	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: cfg.InsecureSkipVerify,
 		},
 	}
 
 	var rt http.RoundTripper = transport
-
-	// Add authentication if configured
-	if cfg.Username != "" && cfg.Password != "" {
+	if cfg.Username != "" {
 		rt = &basicAuthRoundTripper{
 			username: cfg.Username,
 			password: cfg.Password,
-			rt:       transport,
+			rt:       rt,
 		}
 	} else if cfg.Token != "" {
 		rt = &bearerAuthRoundTripper{
 			token: cfg.Token,
-			rt:    transport,
+			rt:    rt,
 		}
+	}
+	if len(params) > 0 {
+		rt = &queryParamsRoundTripper{params: params, rt: rt}
 	}
 
 	client, err := api.NewClient(api.Config{
-		Address:      cfg.URL,
+		Address:      endpoint.String(),
 		RoundTripper: rt,
 	})
 	if err != nil {
@@ -124,93 +168,123 @@ func NewClient(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// CheckConnection verifies the Prometheus server is reachable.
+// CheckConnection verifies the server answers PromQL queries by evaluating
+// vector(1). Unlike /api/v1/status/config this works on VictoriaMetrics and
+// other Prometheus-compatible backends, and it exercises the same path,
+// query parameters and credentials as the real queries.
 func (c *Client) CheckConnection(ctx context.Context) error {
-	_, err := c.api.Config(ctx)
+	result, _, err := c.api.Query(ctx, "vector(1)", time.Now())
 	if err != nil {
 		return fmt.Errorf("failed to connect to Prometheus: %w", err)
+	}
+	vector, ok := result.(model.Vector)
+	if !ok || len(vector) != 1 || float64(vector[0].Value) != 1 {
+		return fmt.Errorf("failed to connect to Prometheus: unexpected response to vector(1): %v", result)
 	}
 	return nil
 }
 
-// GetContainerMetrics queries Prometheus for container resource metrics.
-func (c *Client) GetContainerMetrics(ctx context.Context, namespace, podNamePrefix string, window time.Duration) ([]ContainerMetrics, error) {
-	endTime := time.Now()
-	startTime := endTime.Add(-window)
-	timeRange := promv1.Range{
-		Start: startTime,
-		End:   endTime,
-		Step:  time.Minute * 5, // 5-minute steps
+// newSelector builds the pod selector for a workload, preferring the
+// kube-state-metrics owner join when ownership series are available.
+func (c *Client) newSelector(ctx context.Context, namespace string, w Workload) (podSelector, error) {
+	sel, err := newPodSelector(namespace, w)
+	if err != nil {
+		return podSelector{}, err
+	}
+	sel.ownerJoin = c.ownerSeriesAvailable(ctx, sel)
+	return sel, nil
+}
+
+// ownerSeriesAvailable reports whether kube-state-metrics ownership series
+// exist for the workload. Any failure falls back to pod-name matching.
+func (c *Client) ownerSeriesAvailable(ctx context.Context, sel podSelector) bool {
+	result, _, err := c.api.Query(ctx, sel.ownerProbeQuery(), time.Now())
+	if err != nil {
+		return false
+	}
+	vector, ok := result.(model.Vector)
+	return ok && len(vector) > 0 && vector[0].Value > 0
+}
+
+// GetContainerMetrics queries per-container P95/P99 CPU and memory usage for
+// all pods of the workload. At each step the usage of the workload's pods is
+// reduced with max by container before taking the quantile, so the result is
+// one value per container regardless of the number of pods or duplicate
+// cAdvisor series.
+func (c *Client) GetContainerMetrics(ctx context.Context, namespace string, workload Workload, window time.Duration) ([]ContainerMetrics, error) {
+	sel, err := c.newSelector(ctx, namespace, workload)
+	if err != nil {
+		return nil, err
 	}
 
+	at := time.Now()
 	metrics := make(map[string]*ContainerMetrics)
-
-	// Query P95 CPU usage
-	p95CPUQuery := fmt.Sprintf(
-		`quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"%s.*", container!="", container!="POD"}[5m])[%s:5m])`,
-		namespace, podNamePrefix, formatDuration(window),
-	)
-	if err := c.queryAndExtract(ctx, p95CPUQuery, timeRange, metrics, func(m *ContainerMetrics, v float64) {
-		q := resource.NewMilliQuantity(int64(v*1000), resource.DecimalSI)
-		m.P95CPU = q
-	}); err != nil {
-		return nil, fmt.Errorf("failed to query P95 CPU: %w", err)
+	for _, q := range containerMetricQueries(sel, window) {
+		if err := c.queryAndExtract(ctx, q.query, at, metrics, q.set); err != nil {
+			return nil, fmt.Errorf("failed to query %s: %w", q.name, err)
+		}
 	}
 
-	// Query P99 CPU usage
-	p99CPUQuery := fmt.Sprintf(
-		`quantile_over_time(0.99, rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"%s.*", container!="", container!="POD"}[5m])[%s:5m])`,
-		namespace, podNamePrefix, formatDuration(window),
-	)
-	if err := c.queryAndExtract(ctx, p99CPUQuery, timeRange, metrics, func(m *ContainerMetrics, v float64) {
-		q := resource.NewMilliQuantity(int64(v*1000), resource.DecimalSI)
-		m.P99CPU = q
-	}); err != nil {
-		return nil, fmt.Errorf("failed to query P99 CPU: %w", err)
-	}
-
-	// Query P95 Memory usage
-	p95MemQuery := fmt.Sprintf(
-		`quantile_over_time(0.95, container_memory_working_set_bytes{namespace="%s", pod=~"%s.*", container!="", container!="POD"}[%s:5m])`,
-		namespace, podNamePrefix, formatDuration(window),
-	)
-	if err := c.queryAndExtract(ctx, p95MemQuery, timeRange, metrics, func(m *ContainerMetrics, v float64) {
-		q := resource.NewQuantity(int64(v), resource.BinarySI)
-		m.P95Memory = q
-	}); err != nil {
-		return nil, fmt.Errorf("failed to query P95 memory: %w", err)
-	}
-
-	// Query P99 Memory usage
-	p99MemQuery := fmt.Sprintf(
-		`quantile_over_time(0.99, container_memory_working_set_bytes{namespace="%s", pod=~"%s.*", container!="", container!="POD"}[%s:5m])`,
-		namespace, podNamePrefix, formatDuration(window),
-	)
-	if err := c.queryAndExtract(ctx, p99MemQuery, timeRange, metrics, func(m *ContainerMetrics, v float64) {
-		q := resource.NewQuantity(int64(v), resource.BinarySI)
-		m.P99Memory = q
-	}); err != nil {
-		return nil, fmt.Errorf("failed to query P99 memory: %w", err)
-	}
-
-	// Convert map to slice
 	result := make([]ContainerMetrics, 0, len(metrics))
 	for _, m := range metrics {
 		result = append(result, *m)
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ContainerName < result[j].ContainerName })
 
 	return result, nil
 }
 
-// queryAndExtract executes a Prometheus query and extracts values into ContainerMetrics.
+type containerMetricQuery struct {
+	name  string
+	query string
+	set   func(*ContainerMetrics, float64)
+}
+
+// containerMetricQueries returns the P95/P99 CPU and memory queries for sel.
+func containerMetricQueries(sel podSelector, window time.Duration) []containerMetricQuery {
+	w := formatDuration(window)
+	cpu := sel.scope(fmt.Sprintf(`rate(container_cpu_usage_seconds_total{%s}[5m])`,
+		sel.matchers(`container!=""`, `container!="POD"`)))
+	mem := sel.scope(fmt.Sprintf(`container_memory_working_set_bytes{%s}`,
+		sel.matchers(`container!=""`, `container!="POD"`)))
+	quantile := func(q, expr string) string {
+		return fmt.Sprintf(`quantile_over_time(%s, (max by (container) (%s))[%s:5m])`, q, expr, w)
+	}
+	setCPU := func(set func(*ContainerMetrics, *resource.Quantity)) func(*ContainerMetrics, float64) {
+		return func(m *ContainerMetrics, v float64) {
+			set(m, resource.NewMilliQuantity(int64(v*1000), resource.DecimalSI))
+		}
+	}
+	setMem := func(set func(*ContainerMetrics, *resource.Quantity)) func(*ContainerMetrics, float64) {
+		return func(m *ContainerMetrics, v float64) { set(m, resource.NewQuantity(int64(v), resource.BinarySI)) }
+	}
+	return []containerMetricQuery{
+		{"P95 CPU", quantile("0.95", cpu), setCPU(func(m *ContainerMetrics, q *resource.Quantity) { m.P95CPU = maxQuantity(m.P95CPU, q) })},
+		{"P99 CPU", quantile("0.99", cpu), setCPU(func(m *ContainerMetrics, q *resource.Quantity) { m.P99CPU = maxQuantity(m.P99CPU, q) })},
+		{"P95 memory", quantile("0.95", mem), setMem(func(m *ContainerMetrics, q *resource.Quantity) { m.P95Memory = maxQuantity(m.P95Memory, q) })},
+		{"P99 memory", quantile("0.99", mem), setMem(func(m *ContainerMetrics, q *resource.Quantity) { m.P99Memory = maxQuantity(m.P99Memory, q) })},
+	}
+}
+
+// maxQuantity returns the larger of a and b, treating nil as absent.
+func maxQuantity(a, b *resource.Quantity) *resource.Quantity {
+	if a == nil || (b != nil && b.Cmp(*a) > 0) {
+		return b
+	}
+	return a
+}
+
+// queryAndExtract executes an instant query and passes each per-container
+// sample to setter. Setters must aggregate, because a backend may still
+// return several series for one container.
 func (c *Client) queryAndExtract(
 	ctx context.Context,
 	query string,
-	timeRange promv1.Range,
+	at time.Time,
 	metrics map[string]*ContainerMetrics,
 	setter func(*ContainerMetrics, float64),
 ) error {
-	result, warnings, err := c.api.Query(ctx, query, timeRange.End)
+	result, warnings, err := c.api.Query(ctx, query, at)
 	if err != nil {
 		return err
 	}
@@ -230,6 +304,10 @@ func (c *Client) queryAndExtract(
 		if containerName == "" {
 			continue
 		}
+		v := float64(sample.Value)
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
 
 		if _, exists := metrics[containerName]; !exists {
 			metrics[containerName] = &ContainerMetrics{
@@ -237,7 +315,7 @@ func (c *Client) queryAndExtract(
 			}
 		}
 
-		setter(metrics[containerName], float64(sample.Value))
+		setter(metrics[containerName], v)
 	}
 
 	return nil
@@ -249,6 +327,12 @@ type TimeSeriesPoint struct {
 	Value     float64 `json:"value"`
 }
 
+// Resource types accepted by GetTimeSeriesMetrics.
+const (
+	ResourceTypeCPU    = "cpu"
+	ResourceTypeMemory = "memory"
+)
+
 // TimeSeriesMetrics holds time series data for a container.
 type TimeSeriesMetrics struct {
 	ContainerName string            `json:"containerName"`
@@ -256,8 +340,20 @@ type TimeSeriesMetrics struct {
 	Data          []TimeSeriesPoint `json:"data"`
 }
 
-// GetTimeSeriesMetrics queries Prometheus for time series data.
-func (c *Client) GetTimeSeriesMetrics(ctx context.Context, namespace, podNamePrefix, containerName, resourceType string, window time.Duration) ([]TimeSeriesPoint, error) {
+// GetTimeSeriesMetrics queries a container's usage over time across all pods
+// of the workload, reduced with max per step.
+func (c *Client) GetTimeSeriesMetrics(ctx context.Context, namespace string, workload Workload, containerName, resourceType string, window time.Duration) ([]TimeSeriesPoint, error) {
+	if resourceType != ResourceTypeCPU && resourceType != ResourceTypeMemory {
+		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
+	}
+	if err := ValidateQueryTarget(namespace, workload, containerName); err != nil {
+		return nil, err
+	}
+	sel, err := c.newSelector(ctx, namespace, workload)
+	if err != nil {
+		return nil, err
+	}
+
 	endTime := time.Now()
 	startTime := endTime.Add(-window)
 
@@ -273,21 +369,14 @@ func (c *Client) GetTimeSeriesMetrics(ctx context.Context, namespace, podNamePre
 		Step:  step,
 	}
 
-	var query string
-	switch resourceType {
-	case "cpu":
-		query = fmt.Sprintf(
-			`rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"%s.*", container="%s"}[1m])`,
-			namespace, podNamePrefix, containerName,
-		)
-	case "memory":
-		query = fmt.Sprintf(
-			`container_memory_working_set_bytes{namespace="%s", pod=~"%s.*", container="%s"}`,
-			namespace, podNamePrefix, containerName,
-		)
-	default:
-		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
+	containerMatch := "container=" + promString(containerName)
+	var expr string
+	if resourceType == ResourceTypeCPU {
+		expr = fmt.Sprintf(`rate(container_cpu_usage_seconds_total{%s}[1m])`, sel.matchers(containerMatch))
+	} else {
+		expr = fmt.Sprintf(`container_memory_working_set_bytes{%s}`, sel.matchers(containerMatch))
 	}
+	query := fmt.Sprintf(`max(%s)`, sel.scope(expr))
 
 	result, warnings, err := c.api.QueryRange(ctx, query, timeRange)
 	if err != nil {
@@ -307,7 +396,7 @@ func (c *Client) GetTimeSeriesMetrics(ctx context.Context, namespace, podNamePre
 	for _, series := range matrix {
 		for _, sample := range series.Values {
 			var value float64
-			if resourceType == "cpu" {
+			if resourceType == ResourceTypeCPU {
 				// Convert CPU seconds to cores (already in seconds)
 				value = float64(sample.Value)
 			} else {
@@ -324,20 +413,18 @@ func (c *Client) GetTimeSeriesMetrics(ctx context.Context, namespace, podNamePre
 	return points, nil
 }
 
-// formatDuration formats a duration for Prometheus queries.
+// formatDuration formats a duration for PromQL using the largest unit that
+// represents it exactly (36h stays "36h" rather than being truncated to "1d").
 func formatDuration(d time.Duration) string {
-	seconds := int(d.Seconds())
-	if seconds < 60 {
+	seconds := int64(d / time.Second)
+	switch {
+	case seconds >= 86400 && seconds%86400 == 0:
+		return fmt.Sprintf("%dd", seconds/86400)
+	case seconds >= 3600 && seconds%3600 == 0:
+		return fmt.Sprintf("%dh", seconds/3600)
+	case seconds >= 60 && seconds%60 == 0:
+		return fmt.Sprintf("%dm", seconds/60)
+	default:
 		return fmt.Sprintf("%ds", seconds)
 	}
-	minutes := int(d.Minutes())
-	if minutes < 60 {
-		return fmt.Sprintf("%dm", minutes)
-	}
-	hours := int(d.Hours())
-	if hours < 24 {
-		return fmt.Sprintf("%dh", hours)
-	}
-	days := hours / 24
-	return fmt.Sprintf("%dd", days)
 }
