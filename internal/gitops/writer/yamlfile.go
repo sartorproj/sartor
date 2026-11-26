@@ -38,6 +38,12 @@ import (
 // place, so comments, blank lines, quoting and indentation are untouched. When
 // keys must be inserted, the node tree is re-encoded using the indentation
 // detected in the original file; comments are kept but blank lines may be lost.
+const (
+	tagMap           = "!!map"
+	tagStr           = "!!str"
+	jsonPatchReplace = "replace"
+)
+
 type yamlFile struct {
 	src        []byte
 	docs       []*yaml.Node
@@ -90,16 +96,16 @@ func (f *yamlFile) ensureMapping(parent *yaml.Node, key string) (*yaml.Node, err
 	idx := findKeyIndex(parent, key)
 	if idx == -1 {
 		f.markStructural(parent)
-		node := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		node := &yaml.Node{Kind: yaml.MappingNode, Tag: tagMap}
 		parent.Content = append(parent.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, node)
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: tagStr, Value: key}, node)
 		return node, nil
 	}
 	node := parent.Content[idx+1]
 	if node.Kind == yaml.ScalarNode && (node.Tag == "!!null" || node.Value == "" || node.Value == "~") {
 		// "resources:" or "resources: ~" with no value: turn it into a mapping.
 		f.markStructural(parent)
-		*node = yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", LineComment: node.LineComment}
+		*node = yaml.Node{Kind: yaml.MappingNode, Tag: tagMap, LineComment: node.LineComment}
 		return node, nil
 	}
 	if node.Kind != yaml.MappingNode {
@@ -123,7 +129,7 @@ func (f *yamlFile) setScalar(mapping *yaml.Node, key, value string) {
 	if idx == -1 {
 		f.markStructural(mapping)
 		mapping.Content = append(mapping.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: tagStr, Value: key},
 			&yaml.Node{Kind: yaml.ScalarNode, Value: value})
 		return
 	}

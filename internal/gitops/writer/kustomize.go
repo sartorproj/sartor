@@ -224,10 +224,10 @@ func updateContainerInPatch(f *yamlFile, containers *yaml.Node, update ResourceU
 		f.structural = true
 		containerNode = &yaml.Node{
 			Kind: yaml.MappingNode,
-			Tag:  "!!map",
+			Tag:  tagMap,
 			Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "name"},
-				{Kind: yaml.ScalarNode, Tag: "!!str", Value: update.ContainerName},
+				{Kind: yaml.ScalarNode, Tag: tagStr, Value: "name"},
+				{Kind: yaml.ScalarNode, Tag: tagStr, Value: update.ContainerName},
 			},
 		}
 		containers.Content = append(containers.Content, containerNode)
@@ -257,14 +257,14 @@ func (w *KustomizeWriter) GenerateJSONPatch(updates []ResourceUpdate) ([]byte, e
 		if update.Requests != nil {
 			if update.Requests.CPU != nil {
 				patches = append(patches, JSONPatch{
-					Op:    "replace",
+					Op:    jsonPatchReplace,
 					Path:  fmt.Sprintf("/spec/template/spec/containers/%d/resources/requests/cpu", containerIndex),
 					Value: update.Requests.CPU.String(),
 				})
 			}
 			if update.Requests.Memory != nil {
 				patches = append(patches, JSONPatch{
-					Op:    "replace",
+					Op:    jsonPatchReplace,
 					Path:  fmt.Sprintf("/spec/template/spec/containers/%d/resources/requests/memory", containerIndex),
 					Value: update.Requests.Memory.String(),
 				})
@@ -274,14 +274,14 @@ func (w *KustomizeWriter) GenerateJSONPatch(updates []ResourceUpdate) ([]byte, e
 		if update.Limits != nil {
 			if update.Limits.CPU != nil {
 				patches = append(patches, JSONPatch{
-					Op:    "replace",
+					Op:    jsonPatchReplace,
 					Path:  fmt.Sprintf("/spec/template/spec/containers/%d/resources/limits/cpu", containerIndex),
 					Value: update.Limits.CPU.String(),
 				})
 			}
 			if update.Limits.Memory != nil {
 				patches = append(patches, JSONPatch{
-					Op:    "replace",
+					Op:    jsonPatchReplace,
 					Path:  fmt.Sprintf("/spec/template/spec/containers/%d/resources/limits/memory", containerIndex),
 					Value: update.Limits.Memory.String(),
 				})
@@ -330,7 +330,7 @@ func (w *KustomizeWriter) UpdateKustomization(content []byte, entry Kustomizatio
 	var patches *yaml.Node
 	if patchesIdx == -1 {
 		patches = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-		doc.Content = append(doc.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "patches"}, patches)
+		doc.Content = append(doc.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: tagStr, Value: "patches"}, patches)
 	} else {
 		patches = doc.Content[patchesIdx+1]
 		if patches.Kind == yaml.ScalarNode && (patches.Tag == "!!null" || patches.Value == "") {
@@ -356,25 +356,25 @@ func (w *KustomizeWriter) UpdateKustomization(content []byte, entry Kustomizatio
 
 	f.structural = true
 	if legacy {
-		patches.Content = append(patches.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: entry.PatchPath})
+		patches.Content = append(patches.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: tagStr, Value: entry.PatchPath})
 		return f.render()
 	}
 
 	patchEntry := &yaml.Node{
 		Kind: yaml.MappingNode,
-		Tag:  "!!map",
+		Tag:  tagMap,
 		Content: []*yaml.Node{
-			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "path"},
-			{Kind: yaml.ScalarNode, Tag: "!!str", Value: entry.PatchPath},
-			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "target"},
+			{Kind: yaml.ScalarNode, Tag: tagStr, Value: "path"},
+			{Kind: yaml.ScalarNode, Tag: tagStr, Value: entry.PatchPath},
+			{Kind: yaml.ScalarNode, Tag: tagStr, Value: "target"},
 			{
 				Kind: yaml.MappingNode,
-				Tag:  "!!map",
+				Tag:  tagMap,
 				Content: []*yaml.Node{
-					{Kind: yaml.ScalarNode, Tag: "!!str", Value: "kind"},
-					{Kind: yaml.ScalarNode, Tag: "!!str", Value: entry.Target.Kind},
-					{Kind: yaml.ScalarNode, Tag: "!!str", Value: "name"},
-					{Kind: yaml.ScalarNode, Tag: "!!str", Value: entry.Target.Name},
+					{Kind: yaml.ScalarNode, Tag: tagStr, Value: "kind"},
+					{Kind: yaml.ScalarNode, Tag: tagStr, Value: entry.Target.Kind},
+					{Kind: yaml.ScalarNode, Tag: tagStr, Value: "name"},
+					{Kind: yaml.ScalarNode, Tag: tagStr, Value: entry.Target.Name},
 				},
 			},
 		},

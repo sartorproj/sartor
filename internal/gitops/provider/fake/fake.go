@@ -25,6 +25,8 @@ import (
 	"github.com/sartorproj/sartor/internal/gitops/provider"
 )
 
+const stateOpen = "open"
+
 // Provider is an in-memory provider.Provider that records every call.
 type Provider struct {
 	mu       sync.Mutex
@@ -194,14 +196,14 @@ func (p *Provider) CreatePullRequest(_ context.Context, req provider.CreatePRReq
 	defer p.mu.Unlock()
 	p.record("CreatePullRequest " + req.HeadBranch)
 	for _, pr := range p.prs {
-		if pr.State == "open" && pr.HeadBranch == req.HeadBranch && pr.BaseBranch == req.BaseBranch {
+		if pr.State == stateOpen && pr.HeadBranch == req.HeadBranch && pr.BaseBranch == req.BaseBranch {
 			return nil, fmt.Errorf("pull request for %s: %w", req.HeadBranch, provider.ErrAlreadyExists)
 		}
 	}
 	pr := &provider.PullRequest{
 		Number:     len(p.prs) + 1,
 		URL:        fmt.Sprintf("https://github.example/%s/pull/%d", req.Repository, len(p.prs)+1),
-		State:      "open",
+		State:      stateOpen,
 		Title:      req.Title,
 		Labels:     append([]string(nil), req.Labels...),
 		HeadBranch: req.HeadBranch,
@@ -236,7 +238,7 @@ func (p *Provider) FindOpenPullRequest(_ context.Context, _, head, base string) 
 	defer p.mu.Unlock()
 	p.record("FindOpenPullRequest " + head)
 	for _, pr := range p.prs {
-		if pr.State == "open" && pr.HeadBranch == head && pr.BaseBranch == base {
+		if pr.State == stateOpen && pr.HeadBranch == head && pr.BaseBranch == base {
 			c := *pr
 			return &c, nil
 		}

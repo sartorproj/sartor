@@ -138,7 +138,8 @@ func wbLive() map[string]autoscalingv1alpha1.ResourceRequirements {
 
 func newWBFixture(t *testing.T, enabled bool, atelier *autoscalingv1alpha1.Atelier, extra ...client.Object) *wbFixture {
 	t.Helper()
-	objs := []client.Object{
+	objs := make([]client.Object, 0, 4+len(extra))
+	objs = append(objs,
 		atelier,
 		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: wbControllerNS},
@@ -155,7 +156,7 @@ func newWBFixture(t *testing.T, enabled bool, atelier *autoscalingv1alpha1.Ateli
 				Parameters: &runtime.RawExtension{Raw: []byte(`{"maxChangePercent": 50}`)},
 			},
 		},
-	}
+	)
 	objs = append(objs, extra...)
 	c := fake.NewClientBuilder().WithScheme(wbScheme(t)).WithObjects(objs...).
 		WithStatusSubresource(&autoscalingv1alpha1.Tailoring{}).Build()

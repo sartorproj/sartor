@@ -324,8 +324,7 @@ func renderKustomize(ctx context.Context, p provider.Provider, req Request, ref 
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", kpath, err)
 		}
-		changes := []provider.FileChange{{Path: req.Path, Content: patch}}
-		return append(changes, changed(kpath, kcontent, updatedK)...), nil
+		return append([]provider.FileChange{{Path: req.Path, Content: patch}}, changed(kpath, kcontent, updatedK)...), nil
 	}
 	return nil, fmt.Errorf("patch %s does not exist and no kustomization file was found in %s", req.Path, dir)
 }
