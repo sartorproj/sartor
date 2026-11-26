@@ -2,7 +2,7 @@
 # The builder runs on the build host's platform and cross-compiles for TARGETOS/TARGETARCH,
 # so multi-arch builds never need QEMU emulation for the Go toolchain.
 # Base images are pinned to multi-arch index digests; Dependabot (docker ecosystem) bumps them.
-FROM --platform=$BUILDPLATFORM golang:1.26@sha256:6e59e17a20f13c102e49d82dffab66d41cffe6c266b225d82794328aea859ab5 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4@sha256:5f1b98fa02fe396ebce2a0227a0e08309e11792915b9dd2e1f71053d7e7e6666 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
