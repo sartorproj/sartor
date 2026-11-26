@@ -1217,38 +1217,30 @@ func (h *Handler) CheckOpenCostHealth(w http.ResponseWriter, r *http.Request) {
 	// Create OpenCost client
 	ocClient, err := h.createOpenCostClient(atelier)
 	if err != nil {
-		writeJSON(w, http.StatusOK, Response{
-			Success: true,
-			Data: map[string]interface{}{
-				"connected": false,
-				"enabled":   false,
-				"error":     err.Error(),
-			},
-		})
+		writeJSON(w, http.StatusOK, Response{Success: true, Data: openCostStatus(false, false, err)})
 		return
 	}
 
 	// Check health
 	err = ocClient.HealthCheck(ctx)
 	if err != nil {
-		writeJSON(w, http.StatusOK, Response{
-			Success: true,
-			Data: map[string]interface{}{
-				"connected": false,
-				"enabled":   true,
-				"error":     err.Error(),
-			},
-		})
+		writeJSON(w, http.StatusOK, Response{Success: true, Data: openCostStatus(false, true, err)})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data: map[string]interface{}{
-			"connected": true,
-			"enabled":   true,
-		},
-	})
+	writeJSON(w, http.StatusOK, Response{Success: true, Data: openCostStatus(true, true, nil)})
+}
+
+// openCostStatus builds the OpenCost status payload returned by the API.
+func openCostStatus(connected, enabled bool, err error) map[string]interface{} {
+	status := map[string]interface{}{
+		"connected": connected,
+		"enabled":   enabled,
+	}
+	if err != nil {
+		status["error"] = err.Error()
+	}
+	return status
 }
 
 // GetOpenCostResourceAnalytics returns resource analytics from OpenCost metrics.

@@ -27,6 +27,9 @@ import (
 const (
 	// notAvailable is the placeholder for unavailable values.
 	notAvailable = "N/A"
+
+	// resourcesKey is the YAML key holding container resource settings.
+	resourcesKey = "resources"
 )
 
 // ResourceUpdate contains the updated resource values for a container.
@@ -169,14 +172,14 @@ func updateContainer(containers *yaml.Node, update ResourceUpdate) error {
 		}
 
 		// Find or create resources node
-		resourcesIdx := findKeyIndex(container, "resources")
+		resourcesIdx := findKeyIndex(container, resourcesKey)
 		var resources *yaml.Node
 
 		if resourcesIdx == -1 {
 			// Create resources node
 			keyNode := &yaml.Node{
 				Kind:  yaml.ScalarNode,
-				Value: "resources",
+				Value: resourcesKey,
 			}
 			resources = &yaml.Node{
 				Kind:    yaml.MappingNode,
@@ -302,19 +305,19 @@ func GeneratePRDescriptionDetailed(updates []ResourceUpdate, opts PRDescriptionO
 	// Summary section
 	buf.WriteString("### Summary\n\n")
 	if opts.TargetName != "" {
-		buf.WriteString(fmt.Sprintf("- **Target:** `%s/%s` in namespace `%s`\n", opts.TargetKind, opts.TargetName, opts.Namespace))
+		fmt.Fprintf(&buf, "- **Target:** `%s/%s` in namespace `%s`\n", opts.TargetKind, opts.TargetName, opts.Namespace)
 	}
-	buf.WriteString(fmt.Sprintf("- **Analysis window:** %s\n", opts.AnalysisWindow))
+	fmt.Fprintf(&buf, "- **Analysis window:** %s\n", opts.AnalysisWindow)
 	if opts.Intent != "" {
-		buf.WriteString(fmt.Sprintf("- **Optimization intent:** %s\n", opts.Intent))
+		fmt.Fprintf(&buf, "- **Optimization intent:** %s\n", opts.Intent)
 	}
-	buf.WriteString(fmt.Sprintf("- **Containers modified:** %d\n\n", len(updates)))
+	fmt.Fprintf(&buf, "- **Containers modified:** %d\n\n", len(updates))
 
 	// Changes section
 	buf.WriteString("### Changes\n\n")
 
 	for _, update := range updates {
-		buf.WriteString(fmt.Sprintf("#### Container: `%s`\n\n", update.ContainerName))
+		fmt.Fprintf(&buf, "#### Container: `%s`\n\n", update.ContainerName)
 
 		// Get current resources if available
 		var currentRes *ResourceValues
