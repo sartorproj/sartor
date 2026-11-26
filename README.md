@@ -23,40 +23,46 @@
 
 ### Key Features
 
-- 🎯 **Intent-Based Optimization**: Choose from Eco, Balanced, or Critical profiles
+- 📐 **FitProfiles**: Reusable strategy configuration (percentile or DSP) shared by many workloads
 - 📊 **Flexible Recommendation Strategies**: Plugin-based system supporting percentile and DSP-based prediction
-- 🔬 **DSP-Based Prediction**: Advanced time series forecasting using FFT and autocorrelation (inspired by [Crane](https://gocrane.io))
-- 📈 **Peak Detection**: Advanced algorithms for detecting anomalous peaks in resource usage
+- 🔬 **DSP-Based Prediction**: Time series forecasting using FFT and autocorrelation (inspired by [Crane](https://gocrane.io))
+- 📈 **Peak Detection**: Detects anomalous peaks in resource usage
 - 🧹 **Data Preprocessing**: Automatic imputation, outlier removal, and normalization
-- 🔄 **GitOps Integration**: Creates PRs for raw YAML, Helm, and Kustomize
-- 🚨 **OOM Protection** (opt-in): Raises memory limits after OOMKilled events for workloads with an active Tailoring
-- 🔗 **ArgoCD Support**: Auto-syncs ArgoCD applications after PR merge
-- 🛡️ **Safety Rails**: Configurable min/max limits to prevent over-optimization
-- ⏸️ **Dry-Run Mode**: Preview recommendations without creating PRs
-- 📈 **Cost-Aware**: OpenCost integration for cost-based prioritization (coming soon)
+- 🔄 **GitOps Write-Back**: Opens one GitHub pull request per workload for raw YAML, Helm values, or Kustomize patches, keeping comments and formatting intact
+- 🛡️ **Safety Rails**: Min/max bounds plus a per-PR `maxChangePercent` cap
+- ⏸️ **Dry-Run by Default**: Recommendations are written to status only until Git write-back is enabled
+- 🚨 **OOM Protection (opt-in)**: Raises memory limits of OOMKilled containers in workloads with a non-paused Tailoring
+- 🟢 **VictoriaMetrics Compatible**: Works with any Prometheus-compatible query API, including path prefixes and query parameters
+
+See [Not yet supported](#not-yet-supported) for features that are defined in the API but not implemented.
 
 ## Quick Start
 
 ### Prerequisites
 
-- Kubernetes cluster (v1.11.3+)
-- Prometheus or VictoriaMetrics with cAdvisor container metrics (kube-state-metrics recommended)
-- Git repository access (GitHub, GitLab, or Bitbucket)
+- Kubernetes cluster
+- Prometheus-compatible metrics (Prometheus, VictoriaMetrics, Thanos, ...) with cAdvisor container metrics (kube-state-metrics recommended)
+- A GitHub repository holding your manifests (only needed for write-back)
 - kubectl configured to access your cluster
 
 ### Installation
 
-#### Using Helm (Recommended)
+#### Using Helm
+
+The chart is maintained in [sartorproj/sartorproj-helm](https://github.com/sartorproj/sartorproj-helm) and published as an OCI artifact:
 
 ```bash
-helm repo add sartor https://sartorproj.github.io/sartor
-helm install sartor sartor/sartor --namespace sartor-system --create-namespace
+helm install sartor oci://ghcr.io/sartorproj/charts/sartor \
+  --namespace sartor-system --create-namespace
 ```
 
-#### Using kubectl
+#### From source
 
 ```bash
-kubectl apply -f https://github.com/sartorproj/sartor/releases/latest/download/install.yaml
+make install                                    # CRDs
+make deploy IMG=ghcr.io/sartorproj/sartor:<tag>  # controller
+# or render a single manifest:
+make build-installer IMG=ghcr.io/sartorproj/sartor:<tag>   # writes dist/install.yaml
 ```
 
 ### Basic Configuration
@@ -70,18 +76,37 @@ metadata:
   name: default
 spec:
   prometheus:
-    url: http://prometheus:9090
+    url: http://prometheus.monitoring.svc:9090
   gitProvider:
     type: github
     secretRef:
       name: github-token
-      namespace: sartor-system
+      namespace: sartor-system  # must be the controller's namespace
   prSettings:
-    cooldownPeriod: 168h  # 7 days
+    cooldownPeriod: 168h  # durations use Go syntax (h, m, s); "7d" is invalid
     minChangePercent: 20
+  safetyRails:
+    minCPU: 10m
+    minMemory: 64Mi
 ```
 
-2. **Create a Tailoring (per-workload configuration):**
+2. **Create a FitProfile (strategy configuration):**
+
+```yaml
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: FitProfile
+metadata:
+  name: percentile-balanced
+  namespace: production
+spec:
+  strategy: percentile
+  parameters:
+    requestsBufferPercent: 20
+    limitsBufferPercent: 30
+    maxChangePercent: 50  # largest change a single PR may propose
+```
+
+3. **Create a Tailoring (per-workload configuration):**
 
 ```yaml
 apiVersion: autoscaling.sartorproj.io/v1alpha1
@@ -93,26 +118,108 @@ spec:
   target:
     kind: Deployment
     name: payment-service
-  intent: Balanced
+  fitProfileRef:
+    name: percentile-balanced
+  analysisWindow: 168h
   writeBack:
-    strategy: RawYAML
-    repository: "org/manifests"
-    path: "apps/payment-service/deployment.yaml"
-    branch: "main"
+    repository: github.com/org/manifests
+    path: apps/payment-service/values.yaml
+    type: helm                    # raw, helm or kustomize
+    helmValuePath: app.resources  # required for helm
+    branch: main
 ```
 
-3. **Watch Sartor create optimization PRs!**
+4. **Check the recommendation** with `kubectl get tailoring -n production payment-service -o yaml` (`status.lastAnalysis`). To have Sartor open pull requests, start the controller with `--enable-git-writeback`.
+
+More samples live in [config/samples](config/samples).
+
+## Controller Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--enable-git-writeback` | `false` | Open and update pull requests. When `false`, Sartor never reads Git credentials or calls the Git provider. |
+| `--analysis-interval` | `6h` | How often each Tailoring is re-analyzed (and its pull request refreshed). Status-only updates never trigger analysis; spec changes trigger it immediately. |
+| `--enable-oom-patching` | `false` | Registers the OOM controller. When off, Sartor does not watch Pods and never patches workloads. When on, it patches only workloads targeted by a non-paused Tailoring, skips excluded containers, and handles each OOM once per cooldown. |
+| `--leader-elect` | `false` | Enable leader election (use it with more than one replica). |
+| `--metrics-bind-address` | `0` | Metrics endpoint address (`0` disables it). |
+| `--health-probe-bind-address` | `:8081` | Health and readiness probe address. |
+
+The controller reads Secrets (Git, Prometheus and ArgoCD credentials) directly from the API server and only from its own namespace (`POD_NAMESPACE`, falling back to the service account namespace). A `secretRef` that points to another namespace is rejected without reading the Secret and reported in the Atelier's `SecretRefsValid` condition. RBAC therefore only needs `get` on Secrets in that namespace.
+
+The API server (`cmd/server`) sends no CORS headers by default; the UI calls it same-origin through its proxy. Use `--cors-allowed-origins=https://ui.example.com` (comma-separated, `*` only if set explicitly) to allow cross-origin browsers.
+
+## Prometheus and VictoriaMetrics
+
+`spec.prometheus.url` is the base URL of a Prometheus-compatible query API. Sartor appends `/api/v1/...` to it and keeps any path prefix and query string, so multi-tenant and cluster-scoped setups work:
+
+```yaml
+spec:
+  prometheus:
+    # Single-node VictoriaMetrics
+    url: http://victoria-metrics.example.svc:8428
+    # VictoriaMetrics cluster (vmselect, tenant 0), scoped to one cluster's series
+    # url: http://vmselect.example.svc:8481/select/0/prometheus?extra_label=cluster=example-cluster
+    secretRef:          # optional; keys: username/password (basic) or token (bearer)
+      name: vm-auth
+      namespace: sartor-system
+```
+
+The connectivity check runs the instant query `vector(1)`, which works on Prometheus, VictoriaMetrics single-node and vmselect.
+
+**Pod matching**: Metrics are matched to a workload's pods with kind-specific, anchored pod name patterns (for example `<name>-<hash>-<suffix>` for Deployments and `<name>-<ordinal>` for StatefulSets), so `backend` never picks up pods of `backend-cron`. When kube-state-metrics is present (`kube_pod_owner`, `kube_replicaset_owner`), pods are matched by their owner instead. Usage is aggregated with `max` across all pods of the workload.
+
+## Git Write-Back
+
+When `--enable-git-writeback` is set, each Tailoring gets one branch, `<prSettings.branchPrefix><namespace>/<name>` (default `sartor/<namespace>/<name>`), and at most one open pull request against `writeBack.branch` (or `prSettings.baseBranch`, default `main`). New recommendations update the open pull request instead of opening another. After a merge, the next change opens a new pull request from the updated base branch.
+
+| `writeBack.type` | File at `writeBack.path` | What changes |
+|------------------|--------------------------|--------------|
+| `raw` | Kubernetes manifest (multi-document files are supported) | `resources` of the matching containers in the document whose kind and name match `target` |
+| `helm` | Helm values file | The map at `helmValuePath`, e.g. `app.resources`. For several containers use `app=app.resources,worker=worker.resources`. The path must already exist. |
+| `kustomize` | Strategic merge patch | Container resources in the patch. A missing patch is created and added to the `kustomization.yaml` next to it. |
+
+Edits keep comments, key order, quoting and indentation. Only values that actually change are written, and limits are never added to a container that has none.
+
+Every proposed value is first capped at the FitProfile's `maxChangePercent` (default 50; `100` or more disables the cap) relative to the live workload, then clamped to the safety rails (the FitProfile's `safetyRailsOverride`, otherwise the Atelier's `safetyRails`). The pull request lists each adjustment. `minChangePercent` and `cooldownPeriod` decide when a pull request is worth opening. A Tailoring with `spec.paused: true`, or whose pull request was closed with the `sartor-ignore` label, never touches Git.
+
+### GitHub credentials
+
+Create the Secret in the controller's namespace with either a token:
+
+```bash
+kubectl -n sartor-system create secret generic github-token \
+  --from-literal=token=<fine-grained token with contents and pull requests read/write>
+```
+
+or a GitHub App installation (preferred):
+
+```bash
+kubectl -n sartor-system create secret generic github-token \
+  --from-literal=appId=123456 \
+  --from-literal=installationId=7890123 \
+  --from-file=privateKey=sartor.private-key.pem
+```
+
+The App needs **Contents** and **Pull requests** read and write permissions on the repository. For GitHub Enterprise Server, set `spec.gitProvider.baseURL` (for example `https://github.example.com`). `writeBack.repository` accepts `org/repo`, `github.com/org/repo` or a clone URL.
+
+## Not yet supported
+
+These fields exist in the API but are not implemented yet. Setting them has no effect beyond what is noted:
+
+- **GitLab and Bitbucket**: only `gitProvider.type: github` can write back.
+- **ArgoCD**: Sartor checks connectivity (`status.argoCDConnected`), but `syncOnMerge`, `refreshOnPRCreate` and `hardRefresh` do nothing yet.
+- **`batchMode`**: every Tailoring gets its own pull request.
+- **OpenCost**: `spec.opencost` is not used by the controller.
+- **VPA/HPA detection**: `status.vpaDetected` is always `false`. Do not create Tailorings for workloads a VerticalPodAutoscaler manages.
+- **Several Tailorings writing to the same file**: each opens its own pull request, so they can conflict.
 
 ## Documentation
 
 - [Getting Started Guide](docs/getting-started.md)
 - [Configuration Reference](docs/configuration.md)
 - [Recommendation Strategies](docs/recommendation-strategies.md) - Percentile vs DSP strategies
-- [Intent Profiles Explained](docs/intent-profiles.md)
-- [GitOps Integration](docs/gitops-integration.md)
-- [ArgoCD Setup](docs/argocd-setup.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [API Reference](docs/api-reference.md)
+- [DSP Strategy](docs/dsp-strategy.md)
+- [Developing Strategies](docs/developing-strategies.md)
 
 ## Architecture
 
@@ -144,12 +251,9 @@ flowchart TB
 
     subgraph External["External Services"]
         Prometheus["📊 Prometheus<br/><i>Metrics</i>"]
-        OpenCost["💰 OpenCost<br/><i>Cost Data</i>"]
 
-        subgraph Git["Git Providers"]
+        subgraph Git["Git Provider"]
             GitHub["GitHub"]
-            GitLab["GitLab"]
-            Bitbucket["Bitbucket"]
         end
 
         ArgoCD["🔄 ArgoCD<br/><i>GitOps Sync</i>"]
@@ -162,7 +266,6 @@ flowchart TB
 
     %% Data Flow
     Prometheus -->|"CPU/Memory<br/>Metrics"| Controller
-    OpenCost -->|"Cost<br/>Analytics"| Controller
     Controller -->|"Watch"| Workloads
     Controller -->|"Reconcile"| CRDs
 
@@ -184,45 +287,30 @@ flowchart TB
 
 ### Data Flow
 
-1. **Metrics Collection**: Controller queries Prometheus for CPU/memory usage patterns
-2. **Analysis**: Recommendation engine calculates optimal resources using configured strategy
-3. **PR Creation**: Changes are proposed via Git pull requests (Raw YAML, Helm, or Kustomize)
-4. **GitOps Sync**: After PR merge, ArgoCD automatically syncs changes to the cluster
-5. **OOM Protection** (opt-in, `--enable-oom-patching`): Controller watches for OOMKilled pods and raises the memory limit of workloads that have a non-paused Tailoring
-
-### Controller Behaviour
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--analysis-interval` | `6h` | How often each Tailoring is re-analyzed. Status-only updates never trigger analysis; spec changes trigger it immediately. |
-| `--enable-oom-patching` | `false` | Registers the OOM controller. When off, Sartor does not watch Pods and never patches workloads. When on, it patches only workloads targeted by a non-paused Tailoring, skips excluded containers, and handles each OOM once per cooldown. |
-
-**Pod matching**: Metrics are matched to a workload's pods with kind-specific, anchored pod name patterns (for example `<name>-<hash>-<suffix>` for Deployments and `<name>-<ordinal>` for StatefulSets), so `backend` never picks up pods of `backend-cron`. When kube-state-metrics is present (`kube_pod_owner`, `kube_replicaset_owner`), pods are matched by their owner instead. Usage is aggregated with `max` across all pods of the workload.
-
-**Prometheus / VictoriaMetrics**: `spec.prometheus.url` may include a path prefix and query parameters, which are kept on every request. For example, `http://vmselect.example.svc:8481/select/0/prometheus` targets a VictoriaMetrics cluster tenant, and `http://victoria-metrics.example.svc:8428?extra_label=cluster=example-cluster` adds a label filter. The connectivity check runs the instant query `vector(1)`, which works on Prometheus, VictoriaMetrics single-node and vmselect.
-
-**Credentials**: Secrets referenced by an Atelier (`secretRef`) must live in the controller's namespace (`POD_NAMESPACE`, falling back to the service account namespace). References to other namespaces are rejected without reading the Secret and reported in the `SecretRefsValid` condition. Secrets are read directly from the API server, so the controller only needs `get` on Secrets in its own namespace.
-
-**Server CORS**: The API server sends no CORS headers by default. The UI calls the API same-origin through its proxy. Use `--cors-allowed-origins=https://ui.example.com` (comma-separated, `*` only if set explicitly) to allow cross-origin browsers. Preflight requests are answered before authentication.
+1. **Metrics Collection**: Controller queries Prometheus (or VictoriaMetrics) for CPU/memory usage patterns
+2. **Analysis**: The FitProfile's strategy calculates recommendations, stored in the Tailoring status
+3. **PR Creation**: With `--enable-git-writeback`, changes are proposed as GitHub pull requests (raw YAML, Helm, or Kustomize)
+4. **GitOps Sync**: After the PR is merged, your GitOps tool (for example ArgoCD auto-sync) applies it
+5. **OOM Protection**: With `--enable-oom-patching`, the controller raises limits of OOMKilled containers
 
 ## Concepts
 
 ### Atelier
-Cluster-scoped global configuration defining Prometheus connection, Git provider, and safety rails.
+Cluster-scoped global configuration defining the Prometheus connection, Git provider, PR settings, and safety rails.
+
+### FitProfile
+Namespace-scoped strategy configuration (`percentile` or `dsp`) with its parameters and optional safety rail overrides.
 
 ### Tailoring
-Namespace-scoped configuration for a specific workload, defining optimization intent and write-back strategy.
+Namespace-scoped configuration for a specific workload: the target, the FitProfile to use, and where to write recommendations back. Pull request state is tracked in its status (`prState`, `prUrl`, `prNumber`, `branchName`).
 
-### Cut
-Represents a Git pull request created by Sartor, tracking PR status and changes.
+## Sample FitProfiles
 
-## Intent Profiles
-
-| Profile | Description | Buffer | Use Case |
-|---------|-------------|--------|----------|
-| **Eco** | Maximum cost savings | 10-15% | Non-critical workloads |
-| **Balanced** | Balanced optimization | 20-25% | Most production workloads |
-| **Critical** | Maximum reliability | 30-50% | Critical production services |
+| Sample | Requests buffer | Limits buffer | `maxChangePercent` | Use Case |
+|--------|-----------------|---------------|--------------------|----------|
+| [percentile-eco](config/samples/fitprofile-percentile-eco.yaml) | 10% | 20% | 100 (uncapped) | Non-critical workloads |
+| [percentile-balanced](config/samples/fitprofile-percentile-balanced.yaml) | 20% | 30% | 50 | Most production workloads |
+| [percentile-critical](config/samples/fitprofile-percentile-critical.yaml) | 40% | 50% | 30 | Critical production services |
 
 ## Contributing
 
@@ -257,11 +345,9 @@ make build
 ## Roadmap
 
 - [x] Phase 1: Foundation (MVP)
-- [x] Phase 2: Integrations (Helm, Kustomize, ArgoCD, OOM)
+- [ ] Phase 2: Integrations (Helm, Kustomize and OOM done; ArgoCD sync, GitLab and Bitbucket pending)
 - [ ] Phase 3: Intelligence (OpenCost, priority queue, anomaly detection)
 - [ ] Phase 4: Interface & GreenOps (MCP server, UI dashboard, CO2 calculations)
-
-See [VISION.md](VISION.md) for detailed roadmap.
 
 ## Security
 

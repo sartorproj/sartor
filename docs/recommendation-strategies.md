@@ -6,19 +6,26 @@ Sartor supports multiple recommendation strategies through a flexible plugin sys
 
 ### 1. Percentile Strategy (Default)
 
-The **percentile** strategy uses P95 for requests and P99 for limits, with intent-based buffers.
+The **percentile** strategy uses P95 for requests and P99 for limits, with configurable buffers.
 
-**Configuration:**
+**Configuration** (in a FitProfile):
 ```yaml
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: FitProfile
+metadata:
+  name: percentile-balanced
 spec:
-  strategy: "percentile"  # or omit for default
-  intent: Balanced
+  strategy: percentile
+  parameters:
+    requestsBufferPercent: 20
+    limitsBufferPercent: 30
+    maxChangePercent: 50
 ```
 
 **How it works:**
 - Calculates P95 and P99 from historical metrics
-- Applies intent-based buffers (Eco: 10-20%, Balanced: 20-30%, Critical: 40-50%)
-- Applies gradual change limits based on intent
+- Adds `requestsBufferPercent` and `limitsBufferPercent` on top (see the eco, balanced and critical samples in `config/samples`)
+- Limits each change to `maxChangePercent` of the current value
 - Respects safety rails and resource quotas
 
 **Best for:**
@@ -30,14 +37,13 @@ spec:
 
 The **DSP (Digital Signal Processing)** strategy uses FFT and autocorrelation to detect periodic patterns and predict future usage.
 
-**Configuration:**
+**Configuration** (in a FitProfile):
 ```yaml
 spec:
-  strategy: "dsp"
-  intent: Balanced
-  enablePeakDetection: true
-  enableNormalization: false
-  strategyParameters:
+  strategy: dsp
+  parameters:
+    enablePeakDetection: true
+    enableNormalization: false
     method: "fft"  # or "maxValue"
     marginFraction: 0.2
     lowAmplitudeThreshold: 1.0
@@ -73,20 +79,29 @@ spec:
 **Example:**
 ```yaml
 apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: FitProfile
+metadata:
+  name: dsp-web
+  namespace: web
+spec:
+  strategy: dsp
+  parameters:
+    enablePeakDetection: true
+    method: "fft"
+    marginFraction: 0.15
+    highFrequencyThreshold: 0.01  # Filter out cycles < 100 seconds
+---
+apiVersion: autoscaling.sartorproj.io/v1alpha1
 kind: Tailoring
 metadata:
   name: web-app
+  namespace: web
 spec:
   target:
     kind: Deployment
     name: web-app
-  intent: Balanced
-  strategy: "dsp"
-  enablePeakDetection: true
-  strategyParameters:
-    method: "fft"
-    marginFraction: 0.15
-    highFrequencyThreshold: 0.01  # Filter out cycles < 100 seconds
+  fitProfileRef:
+    name: dsp-web
   writeBack:
     type: raw
     repository: "org/manifests"
