@@ -100,6 +100,12 @@ spec:
                     default: apps/v1
                     description: APIVersion is the API version of the target resource.
                     type: string
+                  cluster:
+                    description: |-
+                      Cluster is the value of the Atelier's prometheus.clusterLabel that
+                      selects the target workload's cluster in the metrics backend.
+                      Required when clusterLabel is set.
+                    type: string
                   kind:
                     description: Kind is the kind of the target resource (Deployment,
                       StatefulSet, etc.).
@@ -110,6 +116,13 @@ spec:
                     type: string
                   name:
                     description: Name is the name of the target resource.
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the namespace of the target workload. Defaults to the
+                      Tailoring's namespace.
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                 required:
                 - kind
@@ -168,6 +181,44 @@ spec:
                 description: ArgoCDSyncTriggered indicates if ArgoCD sync was triggered
                   after merge.
                 type: boolean
+              autoscalers:
+                description: |-
+                  Autoscalers lists the autoscalers detected for the target workload at
+                  the last analysis.
+                items:
+                  description: DetectedAutoscaler is an autoscaler that targets the
+                    Tailoring's workload.
+                  properties:
+                    kind:
+                      description: Kind is the autoscaler kind.
+                      enum:
+                      - HorizontalPodAutoscaler
+                      - VerticalPodAutoscaler
+                      - ScaledObject
+                      type: string
+                    managedBy:
+                      description: ManagedBy names the ScaledObject that owns this
+                        HPA, if known.
+                      type: string
+                    name:
+                      description: Name is the autoscaler name. Empty when the source
+                        does not expose it.
+                      type: string
+                    updateMode:
+                      description: UpdateMode is the VPA update mode (Off, Initial,
+                        Recreate, Auto, ...).
+                      type: string
+                    utilizationResources:
+                      description: |-
+                        UtilizationResources lists the resources (cpu, memory) the HPA scales
+                        on with a Utilization target, i.e. relative to the requests.
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - kind
+                  type: object
+                type: array
               branchName:
                 description: BranchName is the name of the branch created for this
                   recommendation.
@@ -236,6 +287,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              consecutiveFailures:
+                description: |-
+                  ConsecutiveFailures counts the failed analyses since the last
+                  successful one; retries back off exponentially.
+                format: int32
+                type: integer
               ignored:
                 description: |-
                   Ignored indicates the PR was closed with a sartor-ignore label.
@@ -402,9 +459,17 @@ spec:
               observedGeneration:
                 description: |-
                   ObservedGeneration is the metadata.generation of the spec that
-                  LastAnalysis was computed from. A newer generation forces re-analysis.
+                  LastAnalysis was computed from. Spec changes are picked up by the next
+                  scheduled analysis; they do not trigger one.
                 format: int64
                 type: integer
+              oomKilledContainers:
+                description: |-
+                  OOMKilledContainers lists the containers whose last termination was an
+                  OOM kill at the last analysis (from metrics). Their memory is not lowered.
+                items:
+                  type: string
+                type: array
               prMessage:
                 description: PRMessage contains any error or status message.
                 type: string

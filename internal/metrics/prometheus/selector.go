@@ -42,6 +42,8 @@ type Workload struct {
 	Kind string
 	// Name is the workload name.
 	Name string
+	// Cluster is matched against the client's ClusterLabel, if one is set.
+	Cluster string
 }
 
 // PodNameRegex returns a fully anchored regular expression that matches the
@@ -84,6 +86,8 @@ type podSelector struct {
 	namespace string
 	workload  Workload
 	podRegex  string
+	// clusterLabel, when set, is matched against workload.Cluster on every series.
+	clusterLabel string
 	// ownerJoin selects pods through kube-state-metrics ownership series
 	// instead of the pod-name regex.
 	ownerJoin bool
@@ -106,15 +110,48 @@ func ValidateQueryTarget(namespace string, w Workload, containerName string) err
 	return nil
 }
 
-func newPodSelector(namespace string, w Workload) (podSelector, error) {
+func newPodSelector(namespace string, w Workload, clusterLabel string) (podSelector, error) {
 	if err := ValidateQueryTarget(namespace, w, ""); err != nil {
+		return podSelector{}, err
+	}
+	if err := validateCluster(clusterLabel, w.Cluster); err != nil {
 		return podSelector{}, err
 	}
 	re, err := PodNameRegex(w)
 	if err != nil {
 		return podSelector{}, err
 	}
-	return podSelector{namespace: namespace, workload: w, podRegex: re}, nil
+	return podSelector{namespace: namespace, workload: w, podRegex: re, clusterLabel: clusterLabel}, nil
+}
+
+var labelNameRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// validateCluster checks the cluster label name and requires a cluster value
+// when a label is configured, so a query can never span clusters.
+func validateCluster(clusterLabel, cluster string) error {
+	if clusterLabel == "" {
+		if cluster != "" {
+			// Without the label the query would mix series of every cluster.
+			return fmt.Errorf("target cluster %q is set but the Atelier sets no prometheus.clusterLabel", cluster)
+		}
+		return nil
+	}
+	if !labelNameRE.MatchString(clusterLabel) {
+		return fmt.Errorf("invalid cluster label %q", clusterLabel)
+	}
+	if cluster == "" {
+		return fmt.Errorf("a target cluster is required when the Atelier sets prometheus.clusterLabel (%s)", clusterLabel)
+	}
+	return nil
+}
+
+// scopeMatchers returns the cluster (if configured) and namespace matchers.
+func (s podSelector) scopeMatchers() string {
+	ns := "namespace=" + promString(s.namespace)
+	if s.clusterLabel == "" {
+		return ns
+	}
+	return s.clusterLabel + "=" + promString(s.workload.Cluster) + ", " + ns
 }
 
 // matchers returns the label matchers for a cAdvisor series, followed by extra.
@@ -125,7 +162,7 @@ func (s podSelector) matchers(extra ...string) string {
 		podMatch = regexp.QuoteMeta(s.workload.Name) + "-.+"
 	}
 	parts := append([]string{
-		"namespace=" + promString(s.namespace),
+		s.scopeMatchers(),
 		"pod=~" + promString(podMatch),
 	}, extra...)
 	return strings.Join(parts, ", ")
@@ -142,29 +179,29 @@ func (s podSelector) scope(expr string) string {
 // ownedPods returns an expression with one series (value 1) per pod owned by
 // the workload, labelled with namespace and pod.
 func (s podSelector) ownedPods() string {
-	ns := promString(s.namespace)
+	scope := s.scopeMatchers()
 	name := promString(s.workload.Name)
 	if s.workload.Kind == KindDeployment {
 		return fmt.Sprintf(
 			`max by (namespace, pod) (`+
-				`label_replace(kube_pod_owner{namespace=%s, owner_kind="ReplicaSet"}, "replicaset", "$1", "owner_name", "(.+)")`+
+				`label_replace(kube_pod_owner{%s, owner_kind="ReplicaSet"}, "replicaset", "$1", "owner_name", "(.+)")`+
 				` * on (namespace, replicaset) group_left() `+
-				`max by (namespace, replicaset) (kube_replicaset_owner{namespace=%s, owner_kind="Deployment", owner_name=%s})`+
+				`max by (namespace, replicaset) (kube_replicaset_owner{%s, owner_kind="Deployment", owner_name=%s})`+
 				`)`,
-			ns, ns, name)
+			scope, scope, name)
 	}
-	return fmt.Sprintf(`max by (namespace, pod) (kube_pod_owner{namespace=%s, owner_kind=%s, owner_name=%s})`,
-		ns, promString(s.workload.Kind), name)
+	return fmt.Sprintf(`max by (namespace, pod) (kube_pod_owner{%s, owner_kind=%s, owner_name=%s})`,
+		scope, promString(s.workload.Kind), name)
 }
 
 // ownerProbeQuery returns an instant query that is non-empty when
 // kube-state-metrics ownership series exist for the workload.
 func (s podSelector) ownerProbeQuery() string {
-	ns := promString(s.namespace)
+	scope := s.scopeMatchers()
 	name := promString(s.workload.Name)
 	if s.workload.Kind == KindDeployment {
-		return fmt.Sprintf(`count(kube_replicaset_owner{namespace=%s, owner_kind="Deployment", owner_name=%s})`, ns, name)
+		return fmt.Sprintf(`count(kube_replicaset_owner{%s, owner_kind="Deployment", owner_name=%s})`, scope, name)
 	}
-	return fmt.Sprintf(`count(kube_pod_owner{namespace=%s, owner_kind=%s, owner_name=%s})`,
-		ns, promString(s.workload.Kind), name)
+	return fmt.Sprintf(`count(kube_pod_owner{%s, owner_kind=%s, owner_name=%s})`,
+		scope, promString(s.workload.Kind), name)
 }

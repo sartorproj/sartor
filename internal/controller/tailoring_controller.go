@@ -19,12 +19,13 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
-	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	autoscalingv1alpha1 "github.com/sartorproj/sartor/api/v1alpha1"
+	"github.com/sartorproj/sartor/internal/gitops/writer"
 	"github.com/sartorproj/sartor/internal/metrics/prometheus"
 	"github.com/sartorproj/sartor/internal/recommender"
 	"github.com/sartorproj/sartor/internal/recommender/strategy"
@@ -86,8 +88,20 @@ type TailoringReconciler struct {
 	// NewGitProvider creates the Git provider; defaults to DefaultGitProviderFactory.
 	NewGitProvider GitProviderFactory
 
+	// WorkloadSource selects where workload state is read from
+	// (--workload-source). Defaults to WorkloadSourceKubernetes.
+	WorkloadSource WorkloadSource
+
+	// APIReader reads autoscalers without the cache; defaults to the client.
+	APIReader client.Reader
+
 	// now returns the current time; overridable in tests.
 	now func() time.Time
+	// jitter returns the spread offset in [0, 1); overridable in tests.
+	jitter func(*autoscalingv1alpha1.Tailoring) float64
+	// startedAt is when the controller started; analyses that fell due
+	// before it are spread after it.
+	startedAt time.Time
 }
 
 // analysisInterval returns the configured analysis interval or the default.
@@ -105,35 +119,14 @@ func (r *TailoringReconciler) clock() time.Time {
 	return time.Now()
 }
 
-// analysisDueIn returns how long until the Tailoring needs a new analysis.
-// It is zero when there is no previous analysis, the spec changed since the
-// last analysis (generation differs), or the last analysis is older than the
-// analysis interval.
-func (r *TailoringReconciler) analysisDueIn(tailoring *autoscalingv1alpha1.Tailoring) time.Duration {
-	last := tailoring.Status.LastAnalysis
-	if last == nil || last.Timestamp.IsZero() {
-		return 0
-	}
-	if tailoring.Status.ObservedGeneration != tailoring.Generation {
-		return 0
-	}
-	remaining := r.analysisInterval() - r.clock().Sub(last.Timestamp.Time)
-	if remaining <= 0 {
-		return 0
-	}
-	if remaining > r.analysisInterval() {
-		// Timestamp in the future (clock skew): wait at most one interval.
-		return r.analysisInterval()
-	}
-	return remaining
-}
-
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=tailorings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=tailorings/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=tailorings/finalizers,verbs=update
 // +kubebuilder:rbac:groups=autoscaling.sartorproj.io,resources=ateliers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=autoscaling,resources=verticalpodautoscalers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list
+// +kubebuilder:rbac:groups=autoscaling.k8s.io,resources=verticalpodautoscalers,verbs=get;list
+// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch
 
@@ -164,26 +157,6 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeReady, "AtelierNotFound", err.Error())
 	}
 
-	// Check if target workload exists
-	currentResources, err := r.getTargetResources(ctx, tailoring)
-	if err != nil {
-		logger.Error(err, "Failed to get target workload")
-		tailoring.Status.TargetFound = false
-		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeTargetFound, "TargetNotFound", err.Error())
-	}
-	tailoring.Status.TargetFound = true
-	r.setCondition(tailoring, ConditionTypeTargetFound, metav1.ConditionTrue, "TargetFound", "Target workload found")
-
-	// Check for VPA
-	vpaDetected, err := r.checkForVPA(ctx, tailoring)
-	if err != nil {
-		logger.Error(err, "Failed to check for VPA")
-	}
-	tailoring.Status.VPADetected = vpaDetected
-	if vpaDetected {
-		logger.Info("VPA detected for target workload, Sartor will coexist")
-	}
-
 	// Get Prometheus credentials if configured
 	promConfig, err := r.buildPrometheusConfig(ctx, atelier)
 	if err != nil {
@@ -202,6 +175,20 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "PrometheusClientError", err.Error())
 	}
 
+	view, err := r.readWorkload(ctx, tailoring, promClient, logger)
+	if err != nil {
+		logger.Error(err, "Failed to read target workload")
+		if errors.Is(err, errTargetNotFound) || !r.metricsOnly() {
+			tailoring.Status.TargetFound = false
+			return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeTargetFound, "TargetNotFound", err.Error())
+		}
+		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "MetricsQueryError", err.Error())
+	}
+	currentResources := view.current
+	tailoring.Status.TargetFound = true
+	r.setCondition(tailoring, ConditionTypeTargetFound, metav1.ConditionTrue, "TargetFound", "Target workload found")
+	r.setWorkloadStatus(tailoring, view)
+
 	// Determine analysis window
 	analysisWindow := 7 * 24 * time.Hour // Default 7 days
 	if tailoring.Spec.AnalysisWindow != nil {
@@ -211,10 +198,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Query Prometheus for metrics
-	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.Namespace, prometheus.Workload{
-		Kind: tailoring.Spec.Target.Kind,
-		Name: tailoring.Spec.Target.Name,
-	}, analysisWindow)
+	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.TargetNamespace(), targetWorkload(tailoring), analysisWindow)
 	if err != nil {
 		logger.Error(err, "Failed to get container metrics")
 		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "MetricsQueryError", err.Error())
@@ -228,13 +212,8 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "NoMetrics", "No metrics found for target workload")
 	}
 
-	// Get safety rails and quota
 	safetyRails := r.getSafetyRails(atelier)
-	quota, err := r.getResourceQuota(ctx, tailoring.Namespace)
-	if err != nil {
-		logger.Error(err, "Failed to get ResourceQuota")
-		// Continue without quota limits
-	}
+	quota := view.quota
 
 	// Resolve FitProfile to get strategy and parameters
 	strategyName, strategyParams, enablePeakDetection, enableNormalization, safetyRailsOverride := r.resolveFitProfile(ctx, tailoring, atelier, logger)
@@ -262,6 +241,9 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.handleReconcileError(ctx, tailoring, logger, ConditionTypeAnalyzed, "CalculationError", err.Error())
 	}
 
+	applyOOMFloor(recommendations, currentResources, view.oomKilled)
+	r.setScalingPointCondition(tailoring, recommendations, currentResources, assumedKeptBy(tailoring))
+
 	// Convert strategy recommendations to old format for compatibility
 	legacyRecommendations := convertStrategyRecommendations(recommendations)
 
@@ -270,13 +252,22 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	analysisResult.Timestamp = metav1.NewTime(r.clock())
 	tailoring.Status.LastAnalysis = &analysisResult
 	tailoring.Status.ObservedGeneration = tailoring.Generation
-	tailoring.Status.NextAnalysisTime = &metav1.Time{Time: analysisResult.Timestamp.Add(r.analysisInterval())}
+	tailoring.Status.ConsecutiveFailures = 0
+	tailoring.Status.NextAnalysisTime = &metav1.Time{Time: r.nextAnalysisAt(tailoring)}
 	r.setCondition(tailoring, ConditionTypeAnalyzed, metav1.ConditionTrue, "AnalysisComplete", "Resource analysis completed")
 
 	// Check if Tailoring is paused (dry-run mode)
 	if tailoring.Spec.Paused {
 		logger.Info("Tailoring is paused, skipping Cut creation")
 		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "Paused", "Tailoring is paused, recommendations calculated but no Cut created")
+		return r.updateStatusAndRequeue(ctx, tailoring, logger)
+	}
+
+	if len(view.disagreeing) > 0 {
+		logger.Info("Pods disagree on requests/limits, skipping write-back until the next analysis", "containers", view.disagreeing)
+		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionFalse, ReasonPodsDisagree,
+			fmt.Sprintf("Pods of the target report different requests/limits for %s (e.g. during a rollout); write-back skipped until the next analysis",
+				strings.Join(view.disagreeing, ", ")))
 		return r.updateStatusAndRequeue(ctx, tailoring, logger)
 	}
 
@@ -295,7 +286,15 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.updateStatusAndRequeue(ctx, tailoring, logger)
 	}
 
-	r.reconcileGitOps(ctx, tailoring, atelier, currentResources, logger)
+	if notes := r.reconcileGitOps(ctx, tailoring, atelier, currentResources, logger); len(notes) > 0 {
+		keptBy := map[string]bool{}
+		for _, n := range notes {
+			if n.Kind == writer.KindScaledObject && n.KeepsScalingPoint {
+				keptBy[n.Name] = true
+			}
+		}
+		r.setScalingPointCondition(tailoring, recommendations, currentResources, keptBy)
+	}
 	return r.updateStatusAndRequeue(ctx, tailoring, logger)
 }
 
@@ -311,10 +310,11 @@ func (r *TailoringReconciler) updateStatusAndRequeue(
 		logger.Error(err, "Failed to update status")
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: r.analysisInterval()}, nil
+	return ctrl.Result{RequeueAfter: max(r.analysisDueIn(tailoring), time.Second)}, nil
 }
 
-// handleReconcileError handles an error during reconciliation by updating the status and returning the appropriate result.
+// handleReconcileError records a failed analysis and retries with exponential
+// backoff (persisted in the status, so restarts and spec edits keep it).
 func (r *TailoringReconciler) handleReconcileError(
 	ctx context.Context,
 	tailoring *autoscalingv1alpha1.Tailoring,
@@ -322,10 +322,11 @@ func (r *TailoringReconciler) handleReconcileError(
 	conditionType, reason, message string,
 ) (ctrl.Result, error) {
 	r.setCondition(tailoring, conditionType, metav1.ConditionFalse, reason, message)
+	wait := r.scheduleRetry(tailoring)
 	if updateErr := r.Status().Update(ctx, tailoring); updateErr != nil {
 		logger.Error(updateErr, "Failed to update status")
 	}
-	return ctrl.Result{RequeueAfter: DefaultRequeueInterval}, nil
+	return ctrl.Result{RequeueAfter: wait}, nil
 }
 
 // applySafetyRailsOverride applies FitProfile safety rails overrides to the base safety rails.
@@ -393,21 +394,21 @@ func (r *TailoringReconciler) getTargetResources(ctx context.Context, tailoring 
 	switch target.Kind {
 	case "Deployment":
 		deployment := &appsv1.Deployment{}
-		if err := r.Get(ctx, types.NamespacedName{Name: target.Name, Namespace: tailoring.Namespace}, deployment); err != nil {
+		if err := r.Get(ctx, types.NamespacedName{Name: target.Name, Namespace: tailoring.TargetNamespace()}, deployment); err != nil {
 			return nil, err
 		}
 		containers = deployment.Spec.Template.Spec.Containers
 
 	case "StatefulSet":
 		statefulSet := &appsv1.StatefulSet{}
-		if err := r.Get(ctx, types.NamespacedName{Name: target.Name, Namespace: tailoring.Namespace}, statefulSet); err != nil {
+		if err := r.Get(ctx, types.NamespacedName{Name: target.Name, Namespace: tailoring.TargetNamespace()}, statefulSet); err != nil {
 			return nil, err
 		}
 		containers = statefulSet.Spec.Template.Spec.Containers
 
 	case "DaemonSet":
 		daemonSet := &appsv1.DaemonSet{}
-		if err := r.Get(ctx, types.NamespacedName{Name: target.Name, Namespace: tailoring.Namespace}, daemonSet); err != nil {
+		if err := r.Get(ctx, types.NamespacedName{Name: target.Name, Namespace: tailoring.TargetNamespace()}, daemonSet); err != nil {
 			return nil, err
 		}
 		containers = daemonSet.Spec.Template.Spec.Containers
@@ -444,26 +445,14 @@ func convertResourceValues(rl corev1.ResourceList) *autoscalingv1alpha1.Resource
 	return rv
 }
 
-// checkForVPA checks if a VPA exists for the target workload.
-// nolint:unparam // Placeholder implementation - will return variable results when VPA support is added.
-func (r *TailoringReconciler) checkForVPA(ctx context.Context, tailoring *autoscalingv1alpha1.Tailoring) (bool, error) {
-	// Try to list VPAs in the namespace
-	vpaList := &autoscalingv2.HorizontalPodAutoscalerList{} // Using HPA as placeholder; real VPA would require vpav1 API
-	if err := r.List(ctx, vpaList, client.InNamespace(tailoring.Namespace)); err != nil {
-		// VPA CRD might not be installed, which is fine
-		return false, nil
-	}
-
-	// For now, return false as we're using HPA as placeholder
-	// Real implementation would check VerticalPodAutoscaler resources
-	return false, nil
-}
-
 // buildPrometheusConfig builds the Prometheus client configuration.
 func (r *TailoringReconciler) buildPrometheusConfig(ctx context.Context, atelier *autoscalingv1alpha1.Atelier) (prometheus.Config, error) {
 	config := prometheus.Config{
 		URL:                atelier.Spec.Prometheus.URL,
 		InsecureSkipVerify: atelier.Spec.Prometheus.InsecureSkipVerify,
+		ClusterLabel:       atelier.Spec.Prometheus.ClusterLabel,
+		// Without the Kubernetes API, ownership always comes from kube-state-metrics.
+		OwnerJoinOnly: r.metricsOnly(),
 	}
 
 	if atelier.Spec.Prometheus.SecretRef != nil {
@@ -674,6 +663,9 @@ func tailoringPredicates() predicate.Predicate {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *TailoringReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.startedAt.IsZero() {
+		r.startedAt = r.clock()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&autoscalingv1alpha1.Tailoring{}, builder.WithPredicates(tailoringPredicates())).
 		Named("tailoring").

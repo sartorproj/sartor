@@ -37,22 +37,22 @@ const reasonWriteBackFailed = "WriteBackFailed"
 // Git failures are reported as conditions and retried on the next analysis.
 //
 // Git is only contacted when --enable-git-writeback is set and the Tailoring
-// is not paused.
+// is not paused. It returns what was done to autoscalers in the Git file.
 func (r *TailoringReconciler) reconcileGitOps(
 	ctx context.Context,
 	tailoring *autoscalingv1alpha1.Tailoring,
 	atelier *autoscalingv1alpha1.Atelier,
 	live map[string]autoscalingv1alpha1.ResourceRequirements,
 	logger logr.Logger,
-) {
+) []writer.AutoscalerNote {
 	if tailoring.Spec.Paused {
 		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "Paused",
 			"Tailoring is paused, recommendations calculated but nothing written to Git")
-		return
+		return nil
 	}
 	if !r.EnableGitWriteBack || tailoring.Status.LastAnalysis == nil {
 		r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "Ready", "Recommendations calculated")
-		return
+		return nil
 	}
 
 	fail := func(err error) {
@@ -64,13 +64,13 @@ func (r *TailoringReconciler) reconcileGitOps(
 	req, err := buildWriteBackRequest(tailoring, atelier)
 	if err != nil {
 		fail(err)
-		return
+		return nil
 	}
 
 	ghCfg, err := loadGitHubConfig(ctx, r.Client, atelier, r.ControllerNamespace)
 	if err != nil {
 		fail(err)
-		return
+		return nil
 	}
 	newProvider := r.NewGitProvider
 	if newProvider == nil {
@@ -79,17 +79,20 @@ func (r *TailoringReconciler) reconcileGitOps(
 	gitProvider, err := newProvider(ghCfg)
 	if err != nil {
 		fail(err)
-		return
+		return nil
 	}
 
 	plan := writeback.BuildPlan(tailoring.Status.LastAnalysis.Containers, live, r.writeBackGuard(ctx, tailoring, atelier, logger))
 	req.Updates = plan.Updates
+	req.Current = plan.Current
+	req.Autoscalers = tailoring.Status.Autoscalers
+	req.LiveFromPods = r.metricsOnly()
 	req.Body = buildPRBody(tailoring, plan)
 
 	result, err := writeback.Apply(ctx, gitProvider, req)
 	if err != nil {
 		fail(err)
-		return
+		return nil
 	}
 
 	tailoring.Status.BranchName = req.Branch
@@ -105,6 +108,7 @@ func (r *TailoringReconciler) reconcileGitOps(
 			fmt.Sprintf("Pull request #%d: %s", result.PR.Number, result.PR.URL))
 	}
 	r.setCondition(tailoring, ConditionTypeReady, metav1.ConditionTrue, "Ready", "Recommendations calculated")
+	return result.Autoscalers
 }
 
 // buildWriteBackRequest validates the Tailoring's writeBack spec without contacting Git.
@@ -128,6 +132,7 @@ func buildWriteBackRequest(
 	}
 
 	target := tailoring.Spec.Target
+	ns := tailoring.TargetNamespace()
 	req := writeback.Request{
 		Repository:    repo,
 		BaseBranch:    base,
@@ -135,9 +140,9 @@ func buildWriteBackRequest(
 		Path:          wb.Path,
 		Type:          wb.Type,
 		HelmValuePath: wb.HelmValuePath,
-		Target:        writeback.Target{Kind: target.Kind, Name: target.Name, Namespace: tailoring.Namespace},
-		Title:         fmt.Sprintf("chore(sartor): right-size %s %s/%s", target.Kind, tailoring.Namespace, target.Name),
-		CommitMessage: fmt.Sprintf("chore(sartor): right-size %s %s/%s", target.Kind, tailoring.Namespace, target.Name),
+		Target:        writeback.Target{Kind: target.Kind, Name: target.Name, Namespace: ns},
+		Title:         fmt.Sprintf("chore(sartor): right-size %s %s/%s", target.Kind, ns, target.Name),
+		CommitMessage: fmt.Sprintf("chore(sartor): right-size %s %s/%s", target.Kind, ns, target.Name),
 	}
 	return req, req.Validate()
 }
@@ -182,7 +187,7 @@ func buildPRBody(tailoring *autoscalingv1alpha1.Tailoring, plan writeback.Plan) 
 		AnalysisWindow:   analysis.AnalysisWindow.Duration.String(),
 		TargetName:       tailoring.Spec.Target.Name,
 		TargetKind:       tailoring.Spec.Target.Kind,
-		Namespace:        tailoring.Namespace,
+		Namespace:        tailoring.TargetNamespace(),
 		CurrentResources: plan.Current,
 		Metrics:          metrics,
 	})

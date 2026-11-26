@@ -624,11 +624,14 @@ func (h *Handler) RefreshArgoCDApp(w http.ResponseWriter, r *http.Request) {
 }
 
 // DetectArgoCDApp detects which ArgoCD application manages a workload.
+// With the optional cluster parameter the workload runs in another cluster, so
+// its labels are not looked up in this cluster's API.
 func (h *Handler) DetectArgoCDApp(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	namespace := r.URL.Query().Get("namespace")
 	workload := r.URL.Query().Get("workload")
+	cluster := r.URL.Query().Get("cluster")
 
 	if namespace == "" || workload == "" {
 		writeError(w, http.StatusBadRequest, "namespace and workload query parameters are required")
@@ -646,11 +649,16 @@ func (h *Handler) DetectArgoCDApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	argoCDClient, err := h.createArgoCDClient(ctx, atelier)
+	cfg, err := h.argoCDConfig(ctx, atelier)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	workloads := h.client
+	if cluster != "" {
+		workloads = nil
+	}
+	argoCDClient := argocd.NewClient(cfg, workloads)
 
 	app, err := argoCDClient.DetectApplication(ctx, namespace, workload)
 	if err != nil {
@@ -693,6 +701,15 @@ func (h *Handler) getAtelier(ctx context.Context) (*autoscalingv1alpha1.Atelier,
 
 // createArgoCDClient creates an ArgoCD client from Atelier configuration.
 func (h *Handler) createArgoCDClient(ctx context.Context, atelier *autoscalingv1alpha1.Atelier) (*argocd.Client, error) {
+	cfg, err := h.argoCDConfig(ctx, atelier)
+	if err != nil {
+		return nil, err
+	}
+	return argocd.NewClient(cfg, h.client), nil
+}
+
+// argoCDConfig reads the ArgoCD client configuration from the Atelier.
+func (h *Handler) argoCDConfig(ctx context.Context, atelier *autoscalingv1alpha1.Atelier) (argocd.Config, error) {
 	cfg := argocd.Config{
 		InsecureSkipVerify: atelier.Spec.ArgoCD.InsecureSkipVerify,
 	}
@@ -706,7 +723,7 @@ func (h *Handler) createArgoCDClient(ctx context.Context, atelier *autoscalingv1
 				Name:      atelier.Spec.ArgoCD.SecretRef.Name,
 				Namespace: atelier.Spec.ArgoCD.SecretRef.Namespace,
 			}, secret); err != nil {
-				return nil, err
+				return cfg, err
 			}
 
 			if token, ok := secret.Data["token"]; ok {
@@ -715,7 +732,7 @@ func (h *Handler) createArgoCDClient(ctx context.Context, atelier *autoscalingv1
 		}
 	}
 
-	return argocd.NewClient(cfg, h.client), nil
+	return cfg, nil
 }
 
 // createPrometheusClient creates a Prometheus client from Atelier configuration.
@@ -723,6 +740,7 @@ func (h *Handler) createPrometheusClient(ctx context.Context, atelier *autoscali
 	config := prometheus.Config{
 		URL:                atelier.Spec.Prometheus.URL,
 		InsecureSkipVerify: atelier.Spec.Prometheus.InsecureSkipVerify,
+		ClusterLabel:       atelier.Spec.Prometheus.ClusterLabel,
 	}
 
 	if atelier.Spec.Prometheus.SecretRef != nil {
@@ -790,9 +808,10 @@ func (h *Handler) GetMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Query Prometheus for metrics
-	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.Namespace, prometheus.Workload{
-		Kind: tailoring.Spec.Target.Kind,
-		Name: tailoring.Spec.Target.Name,
+	metrics, err := promClient.GetContainerMetrics(ctx, tailoring.TargetNamespace(), prometheus.Workload{
+		Kind:    tailoring.Spec.Target.Kind,
+		Name:    tailoring.Spec.Target.Name,
+		Cluster: tailoring.Spec.Target.Cluster,
 	}, analysisWindow)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get metrics: %v", err))
@@ -811,7 +830,8 @@ const maxTimeSeriesWindow = 31 * 24 * time.Hour
 // GetPrometheusMetrics returns Prometheus time series metrics for a specific container.
 // Query parameters: namespace, name (or legacy podNamePrefix), kind
 // (Deployment, StatefulSet or DaemonSet; default Deployment), containerName,
-// resourceType (cpu or memory) and window.
+// resourceType (cpu or memory), window and cluster (required when the Atelier
+// sets prometheus.clusterLabel).
 func (h *Handler) GetPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -835,7 +855,7 @@ func (h *Handler) GetPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Missing required parameters: namespace, name (or podNamePrefix), containerName, resourceType")
 		return
 	}
-	workload := prometheus.Workload{Kind: kind, Name: workloadName}
+	workload := prometheus.Workload{Kind: kind, Name: workloadName, Cluster: r.URL.Query().Get("cluster")}
 	if _, err := prometheus.PodNameRegex(workload); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -70,6 +71,7 @@ func main() {
 	var enableOOMPatching bool
 	var enableGitWriteBack bool
 	var analysisInterval time.Duration
+	var workloadSourceFlag string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -93,7 +95,10 @@ func main() {
 	flag.BoolVar(&enableGitWriteBack, "enable-git-writeback", false,
 		"If set, write recommendations back to Git and open pull requests. When unset the controller never touches Git.")
 	flag.DurationVar(&analysisInterval, "analysis-interval", controller.DefaultAnalysisInterval,
-		"Minimum time between analyses of a Tailoring whose spec has not changed.")
+		"Time between analyses of a Tailoring. Spec changes are picked up by the next scheduled analysis.")
+	flag.StringVar(&workloadSourceFlag, "workload-source", string(controller.WorkloadSourceKubernetes),
+		"Where workload state is read from: \"kubernetes\" (the Kubernetes API) or \"metrics\" "+
+			"(kube-state-metrics series in the metrics backend; the target cluster's API is not used).")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -104,6 +109,11 @@ func main() {
 
 	if analysisInterval <= 0 {
 		setupLog.Error(nil, "--analysis-interval must be positive", "value", analysisInterval)
+		os.Exit(1)
+	}
+	workloadSource, err := validateWorkloadSource(workloadSourceFlag, enableOOMPatching)
+	if err != nil {
+		setupLog.Error(err, "invalid flags")
 		os.Exit(1)
 	}
 
@@ -207,7 +217,9 @@ func main() {
 	if err := (&controller.TailoringReconciler{
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
+		APIReader:           mgr.GetAPIReader(),
 		AnalysisInterval:    analysisInterval,
+		WorkloadSource:      workloadSource,
 		ControllerNamespace: controllerNamespace,
 		EnableGitWriteBack:  enableGitWriteBack,
 	}).SetupWithManager(mgr); err != nil {
@@ -258,6 +270,19 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// validateWorkloadSource parses --workload-source. OOM patching edits live
+// workloads through the Kubernetes API, which metrics-only mode does not use.
+func validateWorkloadSource(value string, enableOOMPatching bool) (controller.WorkloadSource, error) {
+	source, err := controller.ParseWorkloadSource(value)
+	if err != nil {
+		return "", err
+	}
+	if source == controller.WorkloadSourceMetrics && enableOOMPatching {
+		return "", fmt.Errorf("--enable-oom-patching cannot be used with --workload-source=%s", source)
+	}
+	return source, nil
 }
 
 // setupOOMPatching registers the OOM controller only when enabled, so with

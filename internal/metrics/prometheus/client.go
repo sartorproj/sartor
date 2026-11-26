@@ -45,6 +45,11 @@ type Config struct {
 	Token string
 	// InsecureSkipVerify skips TLS verification.
 	InsecureSkipVerify bool
+	// ClusterLabel, when set, is matched against Workload.Cluster on every series.
+	ClusterLabel string
+	// OwnerJoinOnly always selects pods through kube-state-metrics ownership
+	// series, skipping the probe and the pod-name fallback.
+	OwnerJoinOnly bool
 }
 
 // Client provides methods to query Prometheus for container metrics.
@@ -187,11 +192,11 @@ func (c *Client) CheckConnection(ctx context.Context) error {
 // newSelector builds the pod selector for a workload, preferring the
 // kube-state-metrics owner join when ownership series are available.
 func (c *Client) newSelector(ctx context.Context, namespace string, w Workload) (podSelector, error) {
-	sel, err := newPodSelector(namespace, w)
+	sel, err := newPodSelector(namespace, w, c.config.ClusterLabel)
 	if err != nil {
 		return podSelector{}, err
 	}
-	sel.ownerJoin = c.ownerSeriesAvailable(ctx, sel)
+	sel.ownerJoin = c.config.OwnerJoinOnly || c.ownerSeriesAvailable(ctx, sel)
 	return sel, nil
 }
 

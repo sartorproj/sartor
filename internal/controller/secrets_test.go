@@ -216,8 +216,8 @@ func TestTailoringReconcile_SecretNamespaceRestriction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.RequeueAfter != DefaultRequeueInterval {
-		t.Fatalf("RequeueAfter = %v", res.RequeueAfter)
+	if res.RequeueAfter < DefaultRequeueInterval || res.RequeueAfter > DefaultRequeueInterval+DefaultRequeueInterval/10 {
+		t.Fatalf("RequeueAfter = %v, want first backoff step", res.RequeueAfter)
 	}
 	if len(*gets) != 0 || calls.Load() != 0 {
 		t.Fatalf("secret reads %v, Prometheus calls %d; want none", *gets, calls.Load())

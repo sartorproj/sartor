@@ -201,6 +201,13 @@ spec:
               prometheus:
                 description: Prometheus defines the Prometheus server connection settings.
                 properties:
+                  clusterLabel:
+                    description: |-
+                      ClusterLabel is the label that identifies a workload's cluster on every
+                      series (for example "cluster"). When set, every query matches it against
+                      the Tailoring's spec.target.cluster, so one backend can hold many clusters.
+                    pattern: ^[a-zA-Z_][a-zA-Z0-9_]*$
+                    type: string
                   insecureSkipVerify:
                     description: InsecureSkipVerify skips TLS certificate verification.
                     type: boolean
