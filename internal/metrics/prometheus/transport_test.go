@@ -56,27 +56,27 @@ func TestClient_URLAndAuthPreserved(t *testing.T) {
 		{name: "path prefix trailing slash", suffix: "/select/0/prometheus/", wantPrefix: "/select/0/prometheus"},
 		{
 			name:       "query string",
-			suffix:     "?extra_label=cluster=staging-base-cluster",
-			wantParams: url.Values{"extra_label": {"cluster=staging-base-cluster"}},
+			suffix:     "?extra_label=cluster=example-cluster",
+			wantParams: url.Values{"extra_label": {"cluster=example-cluster"}},
 		},
 		{
 			name:       "prefix and query string",
-			suffix:     "/select/0/prometheus?extra_label=cluster=staging-base-cluster",
+			suffix:     "/select/0/prometheus?extra_label=cluster=example-cluster",
 			wantPrefix: "/select/0/prometheus",
-			wantParams: url.Values{"extra_label": {"cluster=staging-base-cluster"}},
+			wantParams: url.Values{"extra_label": {"cluster=example-cluster"}},
 		},
 		{
 			name:       "prefix trailing slash and repeated params",
-			suffix:     "/select/0/prometheus/?extra_label=cluster=a&extra_label=env=staging&nocache=1",
+			suffix:     "/select/0/prometheus/?extra_label=cluster=a&extra_label=env=test&nocache=1",
 			wantPrefix: "/select/0/prometheus",
-			wantParams: url.Values{"extra_label": {"cluster=a", "env=staging"}, "nocache": {"1"}},
+			wantParams: url.Values{"extra_label": {"cluster=a", "env=test"}, "nocache": {"1"}},
 		},
 		{
 			name:       "basic auth with prefix and query",
-			suffix:     "/select/0/prometheus?extra_label=cluster=staging-base-cluster",
+			suffix:     "/select/0/prometheus?extra_label=cluster=example-cluster",
 			cfg:        Config{Username: "vm", Password: "s3cret"},
 			wantPrefix: "/select/0/prometheus",
-			wantParams: url.Values{"extra_label": {"cluster=staging-base-cluster"}},
+			wantParams: url.Values{"extra_label": {"cluster=example-cluster"}},
 			wantAuth:   "Basic dm06czNjcmV0",
 		},
 		{
@@ -86,10 +86,10 @@ func TestClient_URLAndAuthPreserved(t *testing.T) {
 		},
 		{
 			name:       "bearer auth with prefix and query",
-			suffix:     "/select/0/prometheus?extra_label=cluster=staging-base-cluster",
+			suffix:     "/select/0/prometheus?extra_label=cluster=example-cluster",
 			cfg:        Config{Token: "tkn"},
 			wantPrefix: "/select/0/prometheus",
-			wantParams: url.Values{"extra_label": {"cluster=staging-base-cluster"}},
+			wantParams: url.Values{"extra_label": {"cluster=example-cluster"}},
 			wantAuth:   "Bearer tkn",
 		},
 		{
