@@ -173,7 +173,7 @@ func (p *Preprocessor) Normalize(series []TimeSeries) []TimeSeries {
 	return result
 }
 
-// percentile calculates the percentile value from a sorted slice.
+// percentile returns the p-th percentile (0-100) of values.
 func percentile(values []float64, p float64) float64 {
 	if len(values) == 0 {
 		return 0
@@ -183,7 +183,8 @@ func percentile(values []float64, p float64) float64 {
 	copy(sorted, values)
 	sort.Float64s(sorted)
 
-	index := p * float64(len(sorted)-1)
+	p = math.Max(0, math.Min(100, p))
+	index := p / 100 * float64(len(sorted)-1)
 	lower := int(math.Floor(index))
 	upper := int(math.Ceil(index))
 
