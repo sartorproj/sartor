@@ -49,8 +49,18 @@ const (
 	srcKEDA      = "keda"
 	srcVPA       = "vpa"
 	srcVPAMode   = "vpa_mode"
+	srcVPABound  = "vpa_bound"
 	srcReplicas  = "replicas"
+	srcHPAMetric = "hpa_metric"
+	srcHPAMin    = "hpa_min"
+	srcHPAMax    = "hpa_max"
 )
+
+// boundLabel carries the VPA bound (minallowed_cpu, maxallowed_memory, ...)
+// extracted from the metric name.
+const boundLabel = "sartor_bound"
+
+const vpaBoundMetrics = "kube_verticalpodautoscaler_spec_resourcepolicy_container_policies_(min|max)allowed_(cpu|memory)"
 
 // ResourceValues holds CPU and memory quantities; nil means not set.
 type ResourceValues struct {
@@ -69,6 +79,13 @@ type HPAInfo struct {
 	Name string
 	// UtilizationResources are the resources (cpu, memory) with a Utilization target.
 	UtilizationResources []string
+	// UtilizationTargets maps those resources to their target in percent.
+	UtilizationTargets map[string]int32
+	// OtherMetrics lists the other target metrics as "name type"
+	// (for example "queue_length value").
+	OtherMetrics []string
+	// MinReplicas and MaxReplicas are nil when not reported.
+	MinReplicas, MaxReplicas *int32
 	// ScaledObject is the KEDA ScaledObject that owns the HPA, when the
 	// scaledobject.keda.sh/name label is exposed by kube-state-metrics.
 	ScaledObject string
@@ -78,6 +95,10 @@ type HPAInfo struct {
 type VPAInfo struct {
 	Name       string
 	UpdateMode string
+	// MinAllowed and MaxAllowed hold the container policy bounds by
+	// container name ("*" for the default policy), when kube-state-metrics
+	// exposes them.
+	MinAllowed, MaxAllowed map[string]ResourceValues
 }
 
 // Quota is the first ResourceQuota (by name) of the namespace.
@@ -197,9 +218,16 @@ func snapshotQuery(sel podSelector) (string, error) {
 			scope, hpaJoin), sourceLabel, srcHPATarget),
 		tag(fmt.Sprintf(`max by (horizontalpodautoscaler, label_scaledobject_keda_sh_name) (kube_horizontalpodautoscaler_labels{%s, label_scaledobject_keda_sh_name!=""} * %s)`,
 			scope, hpaJoin), sourceLabel, srcKEDA),
+		tag(fmt.Sprintf(`max by (horizontalpodautoscaler, metric_name, metric_target_type) (kube_horizontalpodautoscaler_spec_target_metric{%s} * %s)`,
+			scope, hpaJoin), sourceLabel, srcHPAMetric),
+		tag(fmt.Sprintf(`max by (horizontalpodautoscaler) (kube_horizontalpodautoscaler_spec_min_replicas{%s} * %s)`, scope, hpaJoin), sourceLabel, srcHPAMin),
+		tag(fmt.Sprintf(`max by (horizontalpodautoscaler) (kube_horizontalpodautoscaler_spec_max_replicas{%s} * %s)`, scope, hpaJoin), sourceLabel, srcHPAMax),
 		tag(fmt.Sprintf(`max by (verticalpodautoscaler) (kube_verticalpodautoscaler_labels{%s, target_kind=%s, target_name=%s})`, scope, kind, name), sourceLabel, srcVPA),
 		tag(fmt.Sprintf(`max by (verticalpodautoscaler, update_mode) (kube_verticalpodautoscaler_spec_updatepolicy_updatemode{%s, target_kind=%s, target_name=%s} == 1)`,
 			scope, kind, name), sourceLabel, srcVPAMode),
+		tag(fmt.Sprintf(`max by (verticalpodautoscaler, container, %s) (label_replace({%s, __name__=~%q}, %q, "$1_$2", "__name__", %q) `+
+			`* on (namespace, verticalpodautoscaler) group_left() max by (namespace, verticalpodautoscaler) (kube_verticalpodautoscaler_labels{%s, target_kind=%s, target_name=%s}))`,
+			boundLabel, scope, vpaBoundMetrics, boundLabel, vpaBoundMetrics, scope, kind, name), sourceLabel, srcVPABound),
 		tag(replicas, sourceLabel, srcReplicas),
 	}
 	return strings.Join(parts, " or "), nil
@@ -303,10 +331,12 @@ func (p *snapshotParser) add(m model.Metric, v float64) {
 		}
 	case srcQuota:
 		p.addQuota(m, v)
-	case srcHPA, srcHPATarget, srcKEDA:
-		p.addHPA(m, source)
+	case srcHPA, srcHPATarget, srcKEDA, srcHPAMetric, srcHPAMin, srcHPAMax:
+		p.addHPA(m, source, v)
 	case srcVPA, srcVPAMode:
 		p.addVPA(m)
+	case srcVPABound:
+		p.addVPABound(m, v)
 	case srcReplicas:
 		p.st.Replicas = replicaCount(v)
 	}
@@ -342,7 +372,7 @@ func (p *snapshotParser) addQuota(m model.Metric, v float64) {
 	}
 }
 
-func (p *snapshotParser) addHPA(m model.Metric, source string) {
+func (p *snapshotParser) addHPA(m model.Metric, source string, v float64) {
 	name := string(m["horizontalpodautoscaler"])
 	if name == "" {
 		return
@@ -354,10 +384,36 @@ func (p *snapshotParser) addHPA(m model.Metric, source string) {
 	}
 	switch source {
 	case srcHPATarget:
-		h.UtilizationResources = appendUnique(h.UtilizationResources, string(m["metric_name"]))
+		res := string(m["metric_name"])
+		h.UtilizationResources = appendUnique(h.UtilizationResources, res)
+		if pct := replicaCount(v); pct != nil && *pct > 0 {
+			if h.UtilizationTargets == nil {
+				h.UtilizationTargets = map[string]int32{}
+			}
+			h.UtilizationTargets[res] = *pct
+		}
+	case srcHPAMetric:
+		metric, typ := string(m["metric_name"]), string(m["metric_target_type"])
+		if typ == "utilization" && (metric == ResourceTypeCPU || metric == ResourceTypeMemory) {
+			return
+		}
+		h.OtherMetrics = appendUnique(h.OtherMetrics, strings.TrimSpace(metric+" "+typ))
+	case srcHPAMin:
+		h.MinReplicas = replicaCount(v)
+	case srcHPAMax:
+		h.MaxReplicas = replicaCount(v)
 	case srcKEDA:
 		h.ScaledObject = string(m["label_scaledobject_keda_sh_name"])
 	}
+}
+
+func (p *snapshotParser) vpa(name string) *VPAInfo {
+	vpa := p.vpas[name]
+	if vpa == nil {
+		vpa = &VPAInfo{Name: name}
+		p.vpas[name] = vpa
+	}
+	return vpa
 }
 
 func (p *snapshotParser) addVPA(m model.Metric) {
@@ -365,15 +421,46 @@ func (p *snapshotParser) addVPA(m model.Metric) {
 	if name == "" {
 		return
 	}
-	vpa := p.vpas[name]
-	if vpa == nil {
-		vpa = &VPAInfo{Name: name}
-		p.vpas[name] = vpa
-	}
+	vpa := p.vpa(name)
 	if mode := string(m["update_mode"]); mode != "" {
 		vpa.UpdateMode = mode
 	}
 }
+
+// addVPABound records a container policy bound; CPU is in cores, memory in bytes.
+func (p *snapshotParser) addVPABound(m model.Metric, v float64) {
+	name, container := string(m["verticalpodautoscaler"]), string(m["container"])
+	if name == "" || container == "" || v < 0 || v > maxBoundValue {
+		return
+	}
+	vpa := p.vpa(name)
+	bound, res, ok := strings.Cut(string(m[boundLabel]), "_")
+	if !ok {
+		return
+	}
+	target := &vpa.MinAllowed
+	if bound == "maxallowed" {
+		target = &vpa.MaxAllowed
+	} else if bound != "minallowed" {
+		return
+	}
+	if *target == nil {
+		*target = map[string]ResourceValues{}
+	}
+	rv := (*target)[container]
+	switch res {
+	case "cpu":
+		rv.CPU = resource.NewMilliQuantity(int64(math.Round(v*1000)), resource.DecimalSI)
+	case "memory":
+		rv.Memory = resource.NewQuantity(int64(math.Round(v)), resource.BinarySI)
+	default:
+		return
+	}
+	(*target)[container] = rv
+}
+
+// maxBoundValue bounds VPA bound samples so the conversions cannot overflow.
+const maxBoundValue = 1 << 50
 
 // finish builds the containers and flags those whose pods disagree: a
 // container missing on some pods, a value that differs between pods
@@ -414,6 +501,7 @@ func (p *snapshotParser) finish() *WorkloadState {
 	for _, name := range sortedKeys(p.hpas) {
 		h := p.hpas[name]
 		sort.Strings(h.UtilizationResources)
+		sort.Strings(h.OtherMetrics)
 		st.HPAs = append(st.HPAs, *h)
 	}
 	for _, name := range sortedKeys(p.vpas) {

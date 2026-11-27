@@ -254,11 +254,18 @@ type containerMetricQuery struct {
 // containerUsageExprs returns the CPU (cores) and memory (bytes) usage of
 // sel's pods, reduced with max by container.
 func containerUsageExprs(sel podSelector) (cpu, mem string) {
+	cpu, mem = podUsageExprs(sel)
+	return "max by (container) (" + cpu + ")", "max by (container) (" + mem + ")"
+}
+
+// podUsageExprs returns the per-pod, per-container CPU (cores) and memory
+// (bytes) usage of sel's pods, not yet reduced.
+func podUsageExprs(sel podSelector) (cpu, mem string) {
 	cpu = sel.scope(fmt.Sprintf(`rate(container_cpu_usage_seconds_total{%s}[5m])`,
 		sel.matchers(`container!=""`, `container!="POD"`)))
 	mem = sel.scope(fmt.Sprintf(`container_memory_working_set_bytes{%s}`,
 		sel.matchers(`container!=""`, `container!="POD"`)))
-	return "max by (container) (" + cpu + ")", "max by (container) (" + mem + ")"
+	return cpu, mem
 }
 
 // containerMetricQueries returns the P95/P99 CPU and memory queries for sel.
