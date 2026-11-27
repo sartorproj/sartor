@@ -193,6 +193,8 @@ func (s *PercentileStrategy) calculateForContainer(
 		s.applyQuotaLimits(&rec, config.ResourceQuota)
 	}
 
+	EnsureLimitsCoverRequests(&rec)
+
 	return rec
 }
 
