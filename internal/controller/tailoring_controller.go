@@ -255,6 +255,7 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Update analysis result in status (include current resources for comparison)
 	analysisResult := r.buildAnalysisResult(metrics, legacyRecommendations, currentResources, analysisWindow)
 	analysisResult.Timestamp = metav1.NewTime(r.clock())
+	analysisResult.Replicas = view.replicas
 	tailoring.Status.LastAnalysis = &analysisResult
 	tailoring.Status.ObservedGeneration = tailoring.Generation
 	tailoring.Status.ConsecutiveFailures = 0

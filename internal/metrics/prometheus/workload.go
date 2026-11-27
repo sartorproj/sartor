@@ -49,6 +49,7 @@ const (
 	srcKEDA      = "keda"
 	srcVPA       = "vpa"
 	srcVPAMode   = "vpa_mode"
+	srcReplicas  = "replicas"
 )
 
 // ResourceValues holds CPU and memory quantities; nil means not set.
@@ -103,6 +104,8 @@ type WorkloadState struct {
 	Quota *Quota
 	HPAs  []HPAInfo
 	VPAs  []VPAInfo
+	// Replicas is the desired replica count; nil when not reported.
+	Replicas *int32
 }
 
 // workloadLabel returns the kube-state-metrics label naming a workload of kind.
@@ -118,6 +121,35 @@ func workloadLabel(kind string) (string, error) {
 	return "", fmt.Errorf("unsupported workload kind %q", kind)
 }
 
+// replicaMetrics names the kube-state-metrics series holding the desired
+// replica count of each workload kind: spec.replicas for Deployments and
+// StatefulSets, the desired number of scheduled pods for DaemonSets.
+var replicaMetrics = map[string]string{
+	KindDeployment:  "kube_deployment_spec_replicas",
+	KindStatefulSet: "kube_statefulset_replicas",
+	KindDaemonSet:   "kube_daemonset_status_desired_number_scheduled",
+}
+
+// replicasExpr returns an expression for the workload's desired replica count.
+func replicasExpr(sel podSelector) (string, error) {
+	wl, err := workloadLabel(sel.workload.Kind)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(`max(%s{%s, %s=%s})`,
+		replicaMetrics[sel.workload.Kind], sel.scopeMatchers(), wl, promString(sel.workload.Name)), nil
+}
+
+// replicaCount converts a replica sample to a count; NaN, infinite, negative
+// or out-of-range values are not a count.
+func replicaCount(v float64) *int32 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > math.MaxInt32 {
+		return nil
+	}
+	n := int32(math.Round(v))
+	return &n
+}
+
 func tag(expr, label, value string) string {
 	return fmt.Sprintf(`label_replace(%s, %q, %q, "", "")`, expr, label, value)
 }
@@ -128,6 +160,10 @@ func tag(expr, label, value string) string {
 // trip replaces what the Kubernetes API path reads with several calls.
 func snapshotQuery(sel podSelector) (string, error) {
 	wl, err := workloadLabel(sel.workload.Kind)
+	if err != nil {
+		return "", err
+	}
+	replicas, err := replicasExpr(sel)
 	if err != nil {
 		return "", err
 	}
@@ -164,6 +200,7 @@ func snapshotQuery(sel podSelector) (string, error) {
 		tag(fmt.Sprintf(`max by (verticalpodautoscaler) (kube_verticalpodautoscaler_labels{%s, target_kind=%s, target_name=%s})`, scope, kind, name), sourceLabel, srcVPA),
 		tag(fmt.Sprintf(`max by (verticalpodautoscaler, update_mode) (kube_verticalpodautoscaler_spec_updatepolicy_updatemode{%s, target_kind=%s, target_name=%s} == 1)`,
 			scope, kind, name), sourceLabel, srcVPAMode),
+		tag(replicas, sourceLabel, srcReplicas),
 	}
 	return strings.Join(parts, " or "), nil
 }
@@ -190,6 +227,31 @@ func (c *Client) GetWorkloadState(ctx context.Context, namespace string, workloa
 		return nil, fmt.Errorf("unexpected result type: %T", result)
 	}
 	return parseSnapshot(vector), nil
+}
+
+// GetReplicas reads the workload's desired replica count from
+// kube-state-metrics. It returns nil without an error when no series exists.
+func (c *Client) GetReplicas(ctx context.Context, namespace string, workload Workload) (*int32, error) {
+	sel, err := newPodSelector(namespace, workload, c.config.ClusterLabel)
+	if err != nil {
+		return nil, err
+	}
+	query, err := replicasExpr(sel)
+	if err != nil {
+		return nil, err
+	}
+	result, _, _, err := c.api.Query(ctx, query, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("failed to query replicas: %w", err)
+	}
+	vector, ok := result.(model.Vector)
+	if !ok {
+		return nil, fmt.Errorf("unexpected result type: %T", result)
+	}
+	if len(vector) == 0 {
+		return nil, nil
+	}
+	return replicaCount(float64(vector[0].Value)), nil
 }
 
 type stateKey struct {
@@ -245,6 +307,8 @@ func (p *snapshotParser) add(m model.Metric, v float64) {
 		p.addHPA(m, source)
 	case srcVPA, srcVPAMode:
 		p.addVPA(m)
+	case srcReplicas:
+		p.st.Replicas = replicaCount(v)
 	}
 }
 

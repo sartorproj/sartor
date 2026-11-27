@@ -109,6 +109,7 @@ type workloadSnapshot struct {
 	memory    float64 // request, bytes
 	memLimit  float64
 	oomKilled bool
+	replicas  *float64
 	extra     []promSample
 }
 
@@ -132,6 +133,9 @@ func (s workloadSnapshot) samples() []promSample {
 	}
 	n := float64(s.pods)
 	out := []promSample{tag("exists", "", 1), tag("pods", "count", n)}
+	if s.replicas != nil {
+		out = append(out, tag("replicas", "", *s.replicas))
+	}
 	if s.pods == 0 {
 		return out
 	}
@@ -485,6 +489,35 @@ func TestMetricsMode_TargetDisappears(t *testing.T) {
 			assert.Empty(t, fx.git.Calls)
 			assert.Equal(t, int32(1), tl.Status.ConsecutiveFailures)
 			assert.Equal(t, DefaultRequeueInterval, res.RequeueAfter)
+		})
+	}
+}
+
+// TestMetricsMode_RecordsReplicas: the replica count comes with the workload
+// snapshot (no extra query) and stays unset when it is not reported.
+func TestMetricsMode_RecordsReplicas(t *testing.T) {
+	four, zero := 4.0, 0.0
+	tests := []struct {
+		name     string
+		replicas *float64
+		want     *int32
+	}{
+		{name: "reported", replicas: &four, want: ptrInt32(4)},
+		{name: "scaled to zero", replicas: &zero, want: ptrInt32(0)},
+		{name: "not reported", replicas: nil, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newMetricsModeFixture(t, mmTailoring("web", func(tl *autoscalingv1alpha1.Tailoring) { tl.Spec.Paused = true }))
+			snap := agreeing()
+			snap.replicas = tt.replicas
+			fx.backend.snapshots[mmTailoringNS] = snap
+
+			_, tl := fx.reconcile(t, "web")
+
+			require.NotNil(t, tl.Status.LastAnalysis)
+			assert.Equal(t, tt.want, tl.Status.LastAnalysis.Replicas)
+			assert.Equal(t, 5, fx.backend.count(), "1 snapshot + 4 usage queries")
 		})
 	}
 }
