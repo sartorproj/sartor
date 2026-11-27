@@ -28,6 +28,7 @@ import (
 	autoscalingv1alpha1 "github.com/sartorproj/sartor/api/v1alpha1"
 	"github.com/sartorproj/sartor/internal/gitops/writeback"
 	"github.com/sartorproj/sartor/internal/gitops/writer"
+	"github.com/sartorproj/sartor/internal/recommender"
 )
 
 const reasonWriteBackFailed = "WriteBackFailed"
@@ -155,8 +156,9 @@ func (r *TailoringReconciler) writeBackGuard(
 	logger logr.Logger,
 ) writeback.Guard {
 	rails := r.getSafetyRails(atelier)
-	_, params, _, _, override := r.resolveFitProfile(ctx, tailoring, atelier, logger)
-	applySafetyRailsOverride(&rails, override)
+	profile := r.resolveFitProfile(ctx, tailoring, recommender.NewCalculator().GetRegistry(), logger)
+	applySafetyRailsOverride(&rails, profile.safetyRails)
+	params := profile.params
 
 	guard := writeback.Guard{
 		MinCPU:    rails.MinCPU,

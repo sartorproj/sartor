@@ -56,6 +56,14 @@ const (
 	ConditionTypePRCreated = "PRCreated"
 	// ConditionTypePRMerged indicates if the PR was merged.
 	ConditionTypePRMerged = "PRMerged"
+	// ConditionTypeFitProfileResolved indicates whether the referenced
+	// FitProfile was used as configured.
+	ConditionTypeFitProfileResolved = "FitProfileResolved"
+
+	// ReasonFitProfileFallback is set on the FitProfileResolved and Analyzed
+	// conditions when the analysis could not use the FitProfile as
+	// configured and fell back to default strategy settings.
+	ReasonFitProfileFallback = "FitProfileFallback"
 
 	// SartorIgnoreLabel is the label that indicates the PR should be ignored.
 	SartorIgnoreLabel = "sartor-ignore"
@@ -215,14 +223,17 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	safetyRails := r.getSafetyRails(atelier)
 	quota := view.quota
 
+	calculator := recommender.NewCalculator()
+
 	// Resolve FitProfile to get strategy and parameters
-	strategyName, strategyParams, enablePeakDetection, enableNormalization, safetyRailsOverride := r.resolveFitProfile(ctx, tailoring, atelier, logger)
+	profile := r.resolveFitProfile(ctx, tailoring, calculator.GetRegistry(), logger)
+	r.setFitProfileCondition(tailoring, profile)
+	strategyName, strategyParams := profile.strategy, profile.params
 
 	// Apply safety rails override from FitProfile if provided
-	applySafetyRailsOverride(&safetyRails, safetyRailsOverride)
+	applySafetyRailsOverride(&safetyRails, profile.safetyRails)
 
 	// Calculate recommendations using strategy-based calculator
-	calculator := recommender.NewCalculator()
 	if s, ok := calculator.GetRegistry().Get(strategyName); ok {
 		if hs, ok := s.(strategy.HistoryStrategy); ok {
 			addUsageHistory(ctx, promClient, tailoring, metrics, analysisWindow, hs.HistoryStep(analysisWindow), logger)
@@ -238,8 +249,8 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		analysisWindow,
 		strategyName,
 		strategyParams,
-		enablePeakDetection,
-		enableNormalization,
+		profile.enablePeakDetection,
+		profile.enableNormalization,
 	)
 	if err != nil {
 		logger.Error(err, "Failed to calculate recommendations")
@@ -260,7 +271,12 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	tailoring.Status.ObservedGeneration = tailoring.Generation
 	tailoring.Status.ConsecutiveFailures = 0
 	tailoring.Status.NextAnalysisTime = &metav1.Time{Time: r.nextAnalysisAt(tailoring)}
-	r.setCondition(tailoring, ConditionTypeAnalyzed, metav1.ConditionTrue, "AnalysisComplete", "Resource analysis completed")
+	if profile.fallback != "" {
+		r.setCondition(tailoring, ConditionTypeAnalyzed, metav1.ConditionTrue, ReasonFitProfileFallback,
+			"Resource analysis completed with a fallback: "+profile.fallback)
+	} else {
+		r.setCondition(tailoring, ConditionTypeAnalyzed, metav1.ConditionTrue, "AnalysisComplete", "Resource analysis completed")
+	}
 
 	// Check if Tailoring is paused (dry-run mode)
 	if tailoring.Spec.Paused {
@@ -516,49 +532,90 @@ func (r *TailoringReconciler) getSafetyRails(atelier *autoscalingv1alpha1.Atelie
 	return rails
 }
 
-// resolveFitProfile resolves the FitProfile reference and extracts configuration.
-// Returns: strategyName, strategyParams, enablePeakDetection, enableNormalization, safetyRailsOverride
+// resolvedFitProfile is the strategy configuration an analysis uses.
+type resolvedFitProfile struct {
+	// ref is the FitProfile as namespace/name.
+	ref                 string
+	strategy            string
+	params              map[string]interface{}
+	enablePeakDetection bool
+	enableNormalization bool
+	safetyRails         *autoscalingv1alpha1.SafetyRailsConfig
+	// fallback explains why the FitProfile could not be used as configured;
+	// empty when it was.
+	fallback string
+}
+
+// resolveFitProfile resolves the FitProfile reference and extracts its
+// configuration. A missing FitProfile falls back to the percentile strategy
+// with default parameters, invalid parameters to default parameters, and an
+// unknown strategy to the percentile strategy; fallback records why.
 func (r *TailoringReconciler) resolveFitProfile(
 	ctx context.Context,
 	tailoring *autoscalingv1alpha1.Tailoring,
-	_ *autoscalingv1alpha1.Atelier,
+	registry *strategy.StrategyRegistry,
 	logger logr.Logger,
-) (string, map[string]interface{}, bool, bool, *autoscalingv1alpha1.SafetyRailsConfig) {
-	// FitProfileRef is required
-	fitProfileNamespace := tailoring.Spec.FitProfileRef.Namespace
-	if fitProfileNamespace == "" {
-		fitProfileNamespace = tailoring.Namespace
+) resolvedFitProfile {
+	key := types.NamespacedName{Name: tailoring.Spec.FitProfileRef.Name, Namespace: tailoring.Spec.FitProfileRef.Namespace}
+	if key.Namespace == "" {
+		key.Namespace = tailoring.Namespace
+	}
+	res := resolvedFitProfile{
+		ref:      key.String(),
+		strategy: strategy.StrategyNamePercentile,
+		params:   map[string]interface{}{},
 	}
 
 	fitProfile := &autoscalingv1alpha1.FitProfile{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      tailoring.Spec.FitProfileRef.Name,
-		Namespace: fitProfileNamespace,
-	}, fitProfile); err != nil {
-		logger.Error(err, "Failed to get FitProfile")
-		// Return defaults - this will cause an error downstream but we'll handle it gracefully
-		return strategy.StrategyNamePercentile, make(map[string]interface{}), false, false, nil
+	if err := r.Get(ctx, key, fitProfile); err != nil {
+		logger.Error(err, "Failed to get FitProfile, falling back to the percentile strategy", "fitProfile", res.ref)
+		if apierrors.IsNotFound(err) {
+			res.fallback = fmt.Sprintf("FitProfile %s not found; using the percentile strategy with default parameters", res.ref)
+		} else {
+			res.fallback = fmt.Sprintf("FitProfile %s could not be read (%v); using the percentile strategy with default parameters", res.ref, err)
+		}
+		return res
 	}
+	res.safetyRails = fitProfile.Spec.SafetyRailsOverride
 
-	// Extract parameters from FitProfile
-	params := make(map[string]interface{})
+	var fallbacks []string
 	if fitProfile.Spec.Parameters != nil && fitProfile.Spec.Parameters.Raw != nil {
+		var params map[string]interface{}
 		if err := json.Unmarshal(fitProfile.Spec.Parameters.Raw, &params); err != nil {
-			logger.Error(err, "Failed to parse FitProfile parameters")
+			logger.Error(err, "Failed to parse FitProfile parameters, using default parameters", "fitProfile", res.ref)
+			fallbacks = append(fallbacks, fmt.Sprintf("FitProfile %s has invalid parameters (%v); using default parameters", res.ref, err))
+		} else if params != nil {
+			res.params = params
 		}
 	}
 
-	// Extract enable flags from parameters (for DSP strategy)
-	enablePeakDetection := false
-	enableNormalization := false
-	if enablePeak, ok := params["enablePeakDetection"].(bool); ok {
-		enablePeakDetection = enablePeak
+	if _, ok := registry.Get(fitProfile.Spec.Strategy); ok {
+		res.strategy = fitProfile.Spec.Strategy
+	} else {
+		logger.Info("FitProfile references an unknown strategy, falling back to the percentile strategy",
+			"fitProfile", res.ref, "strategy", fitProfile.Spec.Strategy)
+		fallbacks = append(fallbacks, fmt.Sprintf("FitProfile %s references unknown strategy %q; using the percentile strategy", res.ref, fitProfile.Spec.Strategy))
 	}
-	if enableNorm, ok := params["enableNormalization"].(bool); ok {
-		enableNormalization = enableNorm
-	}
+	res.fallback = strings.Join(fallbacks, "; ")
 
-	return fitProfile.Spec.Strategy, params, enablePeakDetection, enableNormalization, fitProfile.Spec.SafetyRailsOverride
+	// Extract enable flags from parameters (for DSP strategy)
+	if enablePeak, ok := res.params["enablePeakDetection"].(bool); ok {
+		res.enablePeakDetection = enablePeak
+	}
+	if enableNorm, ok := res.params["enableNormalization"].(bool); ok {
+		res.enableNormalization = enableNorm
+	}
+	return res
+}
+
+// setFitProfileCondition records whether the FitProfile was used as configured.
+func (r *TailoringReconciler) setFitProfileCondition(tailoring *autoscalingv1alpha1.Tailoring, profile resolvedFitProfile) {
+	if profile.fallback != "" {
+		r.setCondition(tailoring, ConditionTypeFitProfileResolved, metav1.ConditionFalse, ReasonFitProfileFallback, profile.fallback)
+		return
+	}
+	r.setCondition(tailoring, ConditionTypeFitProfileResolved, metav1.ConditionTrue, "FitProfileResolved",
+		fmt.Sprintf("Using FitProfile %s with the %s strategy", profile.ref, profile.strategy))
 }
 
 // addUsageHistory fills the usage history of metrics for strategies that
