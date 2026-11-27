@@ -19,6 +19,7 @@ package writer
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,9 @@ const (
 	resourceCPU    = "cpu"
 	resourceMemory = "memory"
 )
+
+// modeOff is the VPA updateMode and container policy mode that disables updates.
+const modeOff = "Off"
 
 // AutoscalerNote reports what was done to an autoscaler found in the same
 // manifest file as the workload.
@@ -58,6 +62,19 @@ type RawOptions struct {
 	// SkipMissingContainers skips updates for containers that are not in the
 	// manifest instead of failing (pod-level values may include injected sidecars).
 	SkipMissingContainers bool
+	// KeepUtilizationTargets lists the resources (cpu, memory) whose requests
+	// were sized for their Utilization target: ScaledObject triggers on them
+	// are left unchanged instead of rescaled.
+	KeepUtilizationTargets []string
+	// VPABounds holds recommended minAllowed/maxAllowed by VPA name and
+	// container. They are applied to VPAs whose updateMode is not Off.
+	VPABounds map[string]map[string]VPABounds
+}
+
+// VPABounds are recommended VPA container policy bounds.
+type VPABounds struct {
+	MinAllowed *ResourceValues
+	MaxAllowed *ResourceValues
 }
 
 // RawResult is the result of RawWriter.Update.
@@ -72,11 +89,14 @@ type RawResult struct {
 
 // Update writes the resource updates into the workload document matching
 // target and keeps the autoscalers in the same file consistent with them:
-//   - VerticalPodAutoscaler: minAllowed/maxAllowed are widened so that each new
-//     request stays within them (updateMode Off is left untouched);
+//   - VerticalPodAutoscaler: recommended bounds (opts.VPABounds) are applied:
+//     minAllowed is set to the recommendation, maxAllowed is raised to it but
+//     never lowered. Then minAllowed/maxAllowed are widened so that each new
+//     request stays within them. updateMode Off is left untouched;
 //   - KEDA ScaledObject: cpu/memory triggers with metricType Utilization are
-//     rescaled so the absolute usage at which it scales stays the same.
-//     AverageValue and non-cpu/memory triggers are left untouched.
+//     rescaled so the absolute usage at which it scales stays the same,
+//     except for opts.KeepUtilizationTargets. AverageValue and
+//     non-cpu/memory triggers are left untouched.
 func (w *RawWriter) Update(content []byte, target ManifestTarget, updates []ResourceUpdate, opts RawOptions) (*RawResult, error) {
 	f, err := parseYAMLFile(content)
 	if err != nil {
@@ -110,9 +130,13 @@ func (w *RawWriter) Update(content []byte, target ManifestTarget, updates []Reso
 		spec := findKey(doc, "spec")
 		switch {
 		case kind == KindVerticalPodAutoscaler && refMatches(findKey(spec, "targetRef"), target, ""):
-			res.Autoscalers = append(res.Autoscalers, adjustVPA(f, spec, name, before, after))
+			note, err := adjustVPA(f, spec, name, before, after, opts.VPABounds[name])
+			if err != nil {
+				return nil, fmt.Errorf("VerticalPodAutoscaler %s: %w", name, err)
+			}
+			res.Autoscalers = append(res.Autoscalers, note)
 		case kind == KindScaledObject && refMatches(findKey(spec, "scaleTargetRef"), target, "Deployment"):
-			res.Autoscalers = append(res.Autoscalers, adjustScaledObject(f, spec, name, before, after))
+			res.Autoscalers = append(res.Autoscalers, adjustScaledObject(f, spec, name, before, after, opts.KeepUtilizationTargets))
 		}
 	}
 
@@ -199,21 +223,29 @@ func requestChanged(before, after map[string]*ResourceValues, container, res str
 	return b.Cmp(*a) != 0
 }
 
-// adjustVPA widens minAllowed/maxAllowed so every changed request stays in bounds.
-func adjustVPA(f *yamlFile, spec *yaml.Node, name string, before, after map[string]*ResourceValues) AutoscalerNote {
+// adjustVPA applies the recommended bounds, then widens minAllowed/maxAllowed
+// so every changed request stays in bounds.
+func adjustVPA(f *yamlFile, spec *yaml.Node, name string, before, after map[string]*ResourceValues, bounds map[string]VPABounds) (AutoscalerNote, error) {
 	note := AutoscalerNote{Kind: KindVerticalPodAutoscaler, Name: name}
 	mode := scalarValue(findKey(findKey(spec, "updatePolicy"), "updateMode"))
 	if mode == "" {
 		mode = "Auto"
 	}
-	if mode == "Off" {
+	if mode == modeOff {
 		note.Details = append(note.Details, "updateMode is Off: the VPA only recommends, bounds left unchanged")
-		return note
+		return note, nil
+	}
+	if len(bounds) > 0 {
+		if err := applyVPABounds(f, spec, bounds, &note); err != nil {
+			return note, err
+		}
 	}
 	policies := findKey(findKey(spec, "resourcePolicy"), "containerPolicies")
 	if policies == nil || policies.Kind != yaml.SequenceNode {
-		note.Details = append(note.Details, fmt.Sprintf("updateMode %s: no containerPolicies, no bounds to adjust", mode))
-		return note
+		if !note.Adjusted {
+			note.Details = append(note.Details, fmt.Sprintf("updateMode %s: no containerPolicies, no bounds to adjust", mode))
+		}
+		return note, nil
 	}
 
 	named := map[string]bool{}
@@ -223,7 +255,7 @@ func adjustVPA(f *yamlFile, spec *yaml.Node, name string, before, after map[stri
 		}
 	}
 	for _, p := range policies.Content {
-		if p.Kind != yaml.MappingNode || scalarValue(findKey(p, "mode")) == "Off" {
+		if p.Kind != yaml.MappingNode || scalarValue(findKey(p, "mode")) == modeOff {
 			continue
 		}
 		policyName := scalarValue(findKey(p, "containerName"))
@@ -246,20 +278,141 @@ func adjustVPA(f *yamlFile, spec *yaml.Node, name string, before, after map[stri
 				if req == nil || !requestChanged(before, after, container, res) {
 					continue
 				}
-				if d := widen(f, p, "minAllowed", res, req, -1); d != "" {
-					note.Details = append(note.Details, fmt.Sprintf("%s (container %s)", d, container))
+				for _, w := range []struct {
+					bound string
+					sign  int
+				}{{"minAllowed", -1}, {"maxAllowed", 1}} {
+					if d := widen(f, p, w.bound, res, req, w.sign); d != "" {
+						note.Adjusted = true
+						note.Details = append(note.Details, fmt.Sprintf("%s (container %s)", d, container))
+					}
 				}
-				if d := widen(f, p, "maxAllowed", res, req, 1); d != "" {
+			}
+		}
+	}
+	if !note.Adjusted {
+		note.Details = append(note.Details, fmt.Sprintf("updateMode %s: bounds already contain the new requests", mode))
+	}
+	return note, nil
+}
+
+// applyVPABounds writes the recommended bounds into each container's policy.
+// A container without its own policy gets one, copied from the "*" policy
+// when there is one so that its mode and controlled resources are kept.
+func applyVPABounds(f *yamlFile, spec *yaml.Node, bounds map[string]VPABounds, note *AutoscalerNote) error {
+	resourcePolicy, err := f.ensureMapping(spec, "resourcePolicy")
+	if err != nil {
+		return err
+	}
+	policies, err := f.ensureSequence(resourcePolicy, "containerPolicies")
+	if err != nil {
+		return err
+	}
+	containers := make([]string, 0, len(bounds))
+	for c := range bounds {
+		containers = append(containers, c)
+	}
+	sort.Strings(containers)
+	for _, container := range containers {
+		policy := findPolicy(policies, container)
+		if policy == nil {
+			policy = &yaml.Node{Kind: yaml.MappingNode, Tag: tagMap}
+			if wildcard := findPolicy(policies, "*"); wildcard != nil {
+				if scalarValue(findKey(wildcard, "mode")) == modeOff {
+					note.Details = append(note.Details, fmt.Sprintf("container %s: policy mode is Off, bounds left unchanged", container))
+					continue
+				}
+				policy = copyNode(wildcard)
+			}
+			f.markStructural(policies)
+			f.setScalar(policy, "containerName", container)
+			policies.Content = append(policies.Content, policy)
+			note.Adjusted = true
+			note.Details = append(note.Details, fmt.Sprintf("added a containerPolicy for container %s", container))
+		}
+		if scalarValue(findKey(policy, "mode")) == modeOff {
+			note.Details = append(note.Details, fmt.Sprintf("container %s: policy mode is Off, bounds left unchanged", container))
+			continue
+		}
+		b := bounds[container]
+		for _, res := range controlledResources(policy) {
+			for _, s := range []struct {
+				bound     string
+				want      *resource.Quantity
+				raiseOnly bool
+			}{{"minAllowed", pick(b.MinAllowed, res), false}, {"maxAllowed", pick(b.MaxAllowed, res), true}} {
+				d, changed, err := setBound(f, policy, s.bound, res, s.want, s.raiseOnly)
+				if err != nil {
+					return err
+				}
+				if d != "" {
+					note.Adjusted = note.Adjusted || changed
 					note.Details = append(note.Details, fmt.Sprintf("%s (container %s)", d, container))
 				}
 			}
 		}
 	}
-	note.Adjusted = len(note.Details) > 0
-	if !note.Adjusted {
-		note.Details = append(note.Details, fmt.Sprintf("updateMode %s: bounds already contain the new requests", mode))
+	return nil
+}
+
+// setBound sets policy[bound][res] to want. With raiseOnly a current value
+// above want is kept: a lower ceiling could cap the VPA under a peak the
+// analysis window did not see. It returns a description and whether the
+// value changed.
+func setBound(f *yamlFile, policy *yaml.Node, bound, res string, want *resource.Quantity, raiseOnly bool) (string, bool, error) {
+	if want == nil {
+		return "", false, nil
 	}
-	return note
+	cur := parseQuantity(findKey(findKey(policy, bound), res))
+	switch {
+	case cur != nil && cur.Cmp(*want) == 0:
+		return "", false, nil
+	case cur != nil && raiseOnly && cur.Cmp(*want) > 0:
+		return fmt.Sprintf("%s.%s %s kept (wider than the recommended %s)", bound, res, cur.String(), want.String()), false, nil
+	}
+	m, err := f.ensureMapping(policy, bound)
+	if err != nil {
+		return "", false, err
+	}
+	f.setScalar(m, res, want.String())
+	if cur == nil {
+		return fmt.Sprintf("%s.%s set to %s", bound, res, want.String()), true, nil
+	}
+	return fmt.Sprintf("%s.%s %s -> %s", bound, res, cur.String(), want.String()), true, nil
+}
+
+func findPolicy(policies *yaml.Node, container string) *yaml.Node {
+	for _, p := range policies.Content {
+		if p.Kind == yaml.MappingNode && scalarValue(findKey(p, "containerName")) == container {
+			return p
+		}
+	}
+	return nil
+}
+
+// controlledResources returns the cpu/memory resources a policy controls.
+func controlledResources(policy *yaml.Node) []string {
+	cr := findKey(policy, "controlledResources")
+	if cr == nil || cr.Kind != yaml.SequenceNode {
+		return []string{resourceCPU, resourceMemory}
+	}
+	var out []string
+	for _, r := range cr.Content {
+		if r.Value == resourceCPU || r.Value == resourceMemory {
+			out = append(out, r.Value)
+		}
+	}
+	return out
+}
+
+func copyNode(n *yaml.Node) *yaml.Node {
+	c := *n
+	c.Content = make([]*yaml.Node, len(n.Content))
+	for i, child := range n.Content {
+		c.Content[i] = copyNode(child)
+	}
+	c.Line, c.Column = 0, 0
+	return &c
 }
 
 // widen moves policy[bound][res] to req when req lies outside it (sign -1 for
@@ -276,7 +429,7 @@ func widen(f *yamlFile, policy *yaml.Node, bound, res string, req *resource.Quan
 
 // adjustScaledObject rescales cpu/memory Utilization triggers so the absolute
 // scaling point stays where it was.
-func adjustScaledObject(f *yamlFile, spec *yaml.Node, name string, before, after map[string]*ResourceValues) AutoscalerNote {
+func adjustScaledObject(f *yamlFile, spec *yaml.Node, name string, before, after map[string]*ResourceValues, keep []string) AutoscalerNote {
 	note := AutoscalerNote{Kind: KindScaledObject, Name: name}
 	triggers := findKey(spec, "triggers")
 	if triggers == nil || triggers.Kind != yaml.SequenceNode {
@@ -303,6 +456,11 @@ func adjustScaledObject(f *yamlFile, spec *yaml.Node, name string, before, after
 		default:
 			untracked++
 			note.Details = append(note.Details, fmt.Sprintf("%s: metric type %q, left unchanged", label, metricType))
+			continue
+		}
+		if slices.Contains(keep, typ) {
+			tracked++
+			note.Details = append(note.Details, label+": the requests are sized for this Utilization target, left unchanged")
 			continue
 		}
 		valueNode := findKey(meta, "value")

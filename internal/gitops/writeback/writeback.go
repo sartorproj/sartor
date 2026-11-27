@@ -60,6 +60,12 @@ type Request struct {
 	// (metrics-only mode): containers missing from Git are skipped instead of
 	// added or failing, since pods can carry injected sidecars.
 	LiveFromPods bool
+	// AlignedResources are the resources whose requests were sized for an
+	// HPA Utilization target; ScaledObject triggers on them are not rescaled.
+	AlignedResources []string
+	// VPABounds are the recommended VPA bounds by VPA name and container,
+	// applied by raw write-back.
+	VPABounds map[string]map[string]writer.VPABounds
 }
 
 // Outcome describes what Apply did.
@@ -225,7 +231,11 @@ func renderChanges(ctx context.Context, p provider.Provider, req Request, ref st
 	switch req.Type {
 	case autoscalingv1alpha1.WriteBackTypeRaw:
 		res, err := writer.NewRawWriter().Update(content, target, req.Updates,
-			writer.RawOptions{SkipMissingContainers: req.LiveFromPods})
+			writer.RawOptions{
+				SkipMissingContainers:  req.LiveFromPods,
+				KeepUtilizationTargets: req.AlignedResources,
+				VPABounds:              req.VPABounds,
+			})
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", req.Path, err)
 		}

@@ -88,6 +88,8 @@ func (r *TailoringReconciler) reconcileGitOps(
 	req.Current = plan.Current
 	req.Autoscalers = tailoring.Status.Autoscalers
 	req.LiveFromPods = r.metricsOnly()
+	req.AlignedResources = alignedResources(tailoring)
+	req.VPABounds = vpaWriteBackBounds(tailoring)
 	req.Body = buildPRBody(tailoring, plan)
 
 	result, err := writeback.Apply(ctx, gitProvider, req)

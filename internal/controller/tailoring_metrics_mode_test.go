@@ -171,10 +171,11 @@ func hpaSamples(name string, utilization []string, scaledObject string) []promSa
 	return out
 }
 
-func vpaSamples(name, mode string) []promSample {
+// vpaSamples reports VPA web with the given update mode.
+func vpaSamples(mode string) []promSample {
 	return []promSample{
-		{labels: map[string]string{"sartor_source": "vpa", "verticalpodautoscaler": name}, value: 1},
-		{labels: map[string]string{"sartor_source": "vpa_mode", "verticalpodautoscaler": name, "update_mode": mode}, value: 1},
+		{labels: map[string]string{"sartor_source": "vpa", "verticalpodautoscaler": "web"}, value: 1},
+		{labels: map[string]string{"sartor_source": "vpa_mode", "verticalpodautoscaler": "web", "update_mode": mode}, value: 1},
 	}
 }
 
@@ -191,6 +192,8 @@ type metricsBackend struct {
 	// history, when set, answers range queries with one "app" series whose
 	// value at a timestamp it returns; otherwise range queries get a vector.
 	history func(ts float64, memory bool) float64
+	// signals, when set, answers the scaling signal queries.
+	signals func(q string) []promSample
 }
 
 func (b *metricsBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +202,7 @@ func (b *metricsBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b.queries = append(b.queries, q)
 	fail, snapshots := b.fail, b.snapshots
 	cpuUsage, memUsage, noUsage := b.cpuUsage, b.memUsage, b.noUsage
-	history := b.history
+	history, signals := b.history, b.signals
 	b.mu.Unlock()
 	if fail {
 		http.Error(w, "backend unavailable", http.StatusServiceUnavailable)
@@ -234,6 +237,8 @@ func (b *metricsBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				samples = s.samples()
 			}
 		}
+	case signals != nil && strings.Contains(q, "sartor_agg"):
+		samples = signals(q)
 	case noUsage:
 	case strings.Contains(q, "container_cpu_usage_seconds_total"):
 		samples = []promSample{{labels: map[string]string{"container": "app"}, value: cpuUsage}}
@@ -363,20 +368,33 @@ func condition(tl *autoscalingv1alpha1.Tailoring, condType string) *metav1.Condi
 func TestMetricsMode_WriteBackWithAutoscalers(t *testing.T) {
 	fx := newMetricsModeFixture(t, mmTailoring("web"))
 	snap := agreeing()
-	snap.extra = append(hpaSamples("keda-hpa-web", []string{"cpu"}, "web"), vpaSamples("web", "Initial")...)
+	snap.extra = append(hpaSamples("keda-hpa-web", []string{"cpu"}, "web"), vpaSamples("Initial")...)
 	fx.backend.snapshots[mmTailoringNS] = snap
 
 	_, tl := fx.reconcile(t, "web")
 
 	require.True(t, tl.Status.TargetFound)
 	assert.Equal(t, "Ready", reason(tl, ConditionTypeReady), tl.Status.Conditions)
-	assert.Equal(t, 5, fx.backend.count(), "1 snapshot + 4 usage queries")
+	assert.Equal(t, 8, fx.backend.count(), "1 snapshot + 4 usage queries + 3 scaling signal queries")
 	assert.Equal(t, []autoscalingv1alpha1.DetectedAutoscaler{
-		{Kind: autoscalingv1alpha1.AutoscalerKindHPA, Name: "keda-hpa-web", UtilizationResources: []string{"cpu"}, ManagedBy: "web"},
+		{
+			Kind: autoscalingv1alpha1.AutoscalerKindHPA, Name: "keda-hpa-web", UtilizationResources: []string{"cpu"}, ManagedBy: "web",
+			UtilizationTargets: []autoscalingv1alpha1.UtilizationTarget{{Resource: "cpu", AverageUtilization: 60}},
+		},
 		{Kind: autoscalingv1alpha1.AutoscalerKindScaledObject, Name: "web"},
 		{Kind: autoscalingv1alpha1.AutoscalerKindVPA, Name: "web", UpdateMode: "Initial"},
 	}, tl.Status.Autoscalers)
 	assert.True(t, tl.Status.VPADetected)
+
+	// The VPA (Initial sets requests at pod creation) and the HPA both act on
+	// cpu: flagged, and the requests stay sized per pod.
+	conflict := condition(tl, ConditionTypeAutoscalerConflict)
+	require.NotNil(t, conflict)
+	assert.Equal(t, metav1.ConditionTrue, conflict.Status)
+	require.NotNil(t, tl.Status.Scaling)
+	require.Len(t, tl.Status.Scaling.Conflicts, 1)
+	assert.Equal(t, "cpu", tl.Status.Scaling.Conflicts[0].Resource)
+	assert.Empty(t, tl.Status.Scaling.AlignedResources)
 
 	file, ok := fx.git.File("sartor/apps/web", mmPath)
 	require.True(t, ok)
@@ -412,7 +430,7 @@ func TestMetricsMode_WriteBackWithAutoscalers(t *testing.T) {
 func TestMetricsMode_HPAScalingPointShift(t *testing.T) {
 	fx := newMetricsModeFixture(t, mmTailoring("web"))
 	snap := agreeing()
-	snap.extra = append(hpaSamples("web", []string{"cpu"}, ""), vpaSamples("web", "Off")...)
+	snap.extra = append(hpaSamples("web", []string{"cpu"}, ""), vpaSamples("Off")...)
 	fx.backend.snapshots[mmTailoringNS] = snap
 	fx.git.SetFile("main", mmPath, strings.Replace(mmManifest, "updateMode: Initial", "updateMode: Off", 1))
 

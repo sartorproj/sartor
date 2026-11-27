@@ -229,6 +229,85 @@ func TestBuildSavingsReport_Totals(t *testing.T) {
 	}
 }
 
+func TestBuildSavingsReport_RequestedTotals(t *testing.T) {
+	type want struct {
+		cpuTotal, memTotal     float64
+		cpuPercent, memPercent *float64
+	}
+	tests := []struct {
+		name  string
+		items []autoscalingv1alpha1.Tailoring
+		want  want
+	}{
+		{name: "zero tailorings: no percentage"},
+		{
+			name:  "replicas 0: zero total, no percentage",
+			items: []autoscalingv1alpha1.Tailoring{analyzed("example-namespace", "my-app", "", replicas(0), ctr("app", "1", "1Gi", "500m", "512Mi"))},
+		},
+		{
+			name: "containers without a recommendation count in the total",
+			items: []autoscalingv1alpha1.Tailoring{analyzed("example-namespace", "my-app", "", replicas(2),
+				ctr("app", "1", "1Gi", "500m", "512Mi"),
+				ctr("sidecar", "500m", "1Gi", "", ""),
+			)},
+			want: want{cpuTotal: 3, memTotal: 4, cpuPercent: ptrFloat(100.0 / 3), memPercent: ptrFloat(25)},
+		},
+		{
+			name:  "missing current CPU requests: no CPU percentage",
+			items: []autoscalingv1alpha1.Tailoring{analyzed("example-namespace", "my-app", "", replicas(2), ctr("app", "", "1Gi", "500m", "512Mi"))},
+			want:  want{memTotal: 2, memPercent: ptrFloat(50)},
+		},
+		{
+			name:  "zero current requests: no percentage",
+			items: []autoscalingv1alpha1.Tailoring{analyzed("example-namespace", "my-app", "", replicas(2), ctr("app", "0", "0", "500m", "512Mi"))},
+		},
+		{
+			name:  "an increase is a negative percentage",
+			items: []autoscalingv1alpha1.Tailoring{analyzed("example-namespace", "my-app", "", replicas(3), ctr("app", "100m", "256Mi", "300m", "1Gi"))},
+			want:  want{cpuTotal: 0.3, memTotal: 0.75, cpuPercent: ptrFloat(-200), memPercent: ptrFloat(-300)},
+		},
+		{
+			name: "invalid quantities are left out of the total",
+			items: []autoscalingv1alpha1.Tailoring{analyzed("example-namespace", "my-app", "", replicas(1),
+				ctr("negative", "-1", "-1Gi", "100m", "128Mi"),
+				ctr("huge", "1e30", "1e30", "100m", "128Mi"),
+				ctr("valid", "200m", "256Mi", "100m", "128Mi"),
+			)},
+			want: want{cpuTotal: 0.2, memTotal: 0.25, cpuPercent: ptrFloat(50), memPercent: ptrFloat(50)},
+		},
+		{
+			name: "skipped tailorings are left out of the total",
+			items: []autoscalingv1alpha1.Tailoring{
+				notAnalyzed("example-namespace", "pending"),
+				analyzed("example-namespace", "no-replicas", "", nil, ctr("app", "1", "1Gi", "500m", "512Mi")),
+				analyzed("example-namespace", "no-recommendation", "", replicas(5), ctr("app", "1", "1Gi", "", "")),
+				analyzed("example-namespace", "my-app", "", replicas(4), ctr("app", "1", "1Gi", "500m", "512Mi")),
+			},
+			want: want{cpuTotal: 4, memTotal: 4, cpuPercent: ptrFloat(50), memPercent: ptrFloat(50)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := buildSavingsReport(tt.items, SavingsPricing{})
+			assert.InDelta(t, tt.want.cpuTotal, r.Totals.CPU.TotalRequestedCores, delta)
+			assert.InDelta(t, tt.want.memTotal, r.Totals.Memory.TotalRequestedGiB, delta)
+			for _, p := range []struct {
+				name      string
+				want, got *float64
+			}{{"cpu", tt.want.cpuPercent, r.Totals.CPU.NetPercent}, {"memory", tt.want.memPercent, r.Totals.Memory.NetPercent}} {
+				if p.want == nil {
+					assert.Nil(t, p.got, p.name)
+					continue
+				}
+				require.NotNil(t, p.got, p.name)
+				assert.InDelta(t, *p.want, *p.got, delta, p.name)
+			}
+			_, err := json.Marshal(r)
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestBuildSavingsReport_Groups(t *testing.T) {
 	overridden := analyzed("example-namespace", "other-app", "example-cluster", replicas(1), ctr("app", "1", "1Gi", "500m", "512Mi"))
 	overridden.Spec.Target.Namespace = "workload-namespace"
@@ -265,6 +344,14 @@ func TestBuildSavingsReport_Groups(t *testing.T) {
 		{cluster: "example-cluster", namespace: "workload-namespace", tailorings: 1, cpuReclaim: 0.5},
 	}, got(r.ByNamespace), "grouped by the workload namespace")
 	assert.Equal(t, SavingsCounts{Total: 5, Included: 4, SkippedNoAnalysis: 1}, r.Tailorings)
+
+	// example-cluster requests 2 + 0.1 + 1 cores and nets 1.5 - 0.1.
+	assert.InDelta(t, 3.1, r.ByCluster[1].CPU.TotalRequestedCores, delta)
+	require.NotNil(t, r.ByCluster[1].CPU.NetPercent)
+	assert.InDelta(t, 1.4/3.1*100, *r.ByCluster[1].CPU.NetPercent, delta)
+	assert.InDelta(t, 0.1, r.ByNamespace[1].CPU.TotalRequestedCores, delta)
+	assert.InDelta(t, -100, *r.ByNamespace[1].CPU.NetPercent, delta)
+	assert.InDelta(t, 4.1, r.Totals.CPU.TotalRequestedCores, delta)
 }
 
 func TestBuildSavingsReport_Pricing(t *testing.T) {
@@ -560,6 +647,8 @@ func TestGetSavings_Response(t *testing.T) {
 		assert.Contains(t, body, `"tailorings":{"total":0,"included":0,"skippedNoAnalysis":0,"skippedNoReplicas":0,"skippedNoCurrentRequest":0}`)
 		assert.NotContains(t, body, `"pricing"`)
 		assert.NotContains(t, body, `"cost"`)
+		assert.Contains(t, body, `"cpu":{"reclaimableCores":0,"increaseCores":0,"netCores":0,"totalRequestedCores":0,"netPercent":null}`)
+		assert.Contains(t, body, `"memory":{"reclaimableGiB":0,"increaseGiB":0,"netGiB":0,"totalRequestedGiB":0,"netPercent":null}`)
 	})
 
 	t.Run("with prices", func(t *testing.T) {
@@ -580,6 +669,12 @@ func TestGetSavings_Response(t *testing.T) {
 		assert.InDelta(t, 1, r.Totals.Memory.ReclaimableGiB, delta)
 		require.NotNil(t, r.Totals.Cost)
 		assert.InDelta(t, 0.034, r.Totals.Cost.ReclaimablePerHour, delta)
+		assert.InDelta(t, 2, r.Totals.CPU.TotalRequestedCores, delta)
+		require.NotNil(t, r.Totals.CPU.NetPercent)
+		assert.InDelta(t, 50, *r.Totals.CPU.NetPercent, delta)
+		assert.InDelta(t, 2, r.Totals.Memory.TotalRequestedGiB, delta)
+		require.NotNil(t, r.Totals.Memory.NetPercent)
+		assert.InDelta(t, 50, *r.Totals.Memory.NetPercent, delta)
 		require.Len(t, r.ByCluster, 1)
 		assert.Equal(t, "example-cluster", r.ByCluster[0].Cluster)
 		require.Len(t, r.ByNamespace, 1)

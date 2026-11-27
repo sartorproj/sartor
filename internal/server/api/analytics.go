@@ -70,6 +70,12 @@ type CPUSavings struct {
 	IncreaseCores float64 `json:"increaseCores"`
 	// NetCores is ReclaimableCores - IncreaseCores.
 	NetCores float64 `json:"netCores"`
+	// TotalRequestedCores sums the current CPU requests x replicas of every
+	// container of the included Tailorings that has one.
+	TotalRequestedCores float64 `json:"totalRequestedCores"`
+	// NetPercent is NetCores as a percentage of TotalRequestedCores; null
+	// when the total is zero.
+	NetPercent *float64 `json:"netPercent"`
 }
 
 // MemorySavings is a memory request change in GiB.
@@ -77,6 +83,12 @@ type MemorySavings struct {
 	ReclaimableGiB float64 `json:"reclaimableGiB"`
 	IncreaseGiB    float64 `json:"increaseGiB"`
 	NetGiB         float64 `json:"netGiB"`
+	// TotalRequestedGiB sums the current memory requests x replicas of every
+	// container of the included Tailorings that has one.
+	TotalRequestedGiB float64 `json:"totalRequestedGiB"`
+	// NetPercent is NetGiB as a percentage of TotalRequestedGiB; null when
+	// the total is zero.
+	NetPercent *float64 `json:"netPercent"`
 }
 
 // CostSavings prices a request change with the prices given in the request.
@@ -163,9 +175,12 @@ type containerSaving struct {
 }
 
 // tailoringSavings groups the container savings of one included Tailoring.
+// requestedMilli and requestedBytes sum the current requests x replicas of
+// all its containers with a valid current request, recommended or not.
 type tailoringSavings struct {
-	tailoring  *autoscalingv1alpha1.Tailoring
-	containers []containerSaving
+	tailoring                      *autoscalingv1alpha1.Tailoring
+	containers                     []containerSaving
+	requestedMilli, requestedBytes float64
 }
 
 // collectSavings computes the container savings of every Tailoring that has
@@ -198,6 +213,12 @@ func collectSavings(items []autoscalingv1alpha1.Tailoring) ([]tailoringSavings, 
 			}
 			if s.cpuMilli != nil || s.memBytes != nil {
 				ts.containers = append(ts.containers, s)
+			}
+			if v, ok := requestValue(cpuRequest(c.Current), true); ok {
+				ts.requestedMilli += float64(v) * float64(replicas)
+			}
+			if v, ok := requestValue(memoryRequest(c.Current), false); ok {
+				ts.requestedBytes += float64(v) * float64(replicas)
 			}
 		}
 		if len(ts.containers) == 0 {
@@ -259,13 +280,16 @@ func requestValue(q *resource.Quantity, milli bool) (int64, bool) {
 
 // savingsAccumulator sums container savings in millicores and bytes.
 type savingsAccumulator struct {
-	tailorings                  int
-	reclaimMilli, increaseMilli float64
-	reclaimBytes, increaseBytes float64
+	tailorings                     int
+	reclaimMilli, increaseMilli    float64
+	reclaimBytes, increaseBytes    float64
+	requestedMilli, requestedBytes float64
 }
 
 func (a *savingsAccumulator) add(ts tailoringSavings) {
 	a.tailorings++
+	a.requestedMilli += ts.requestedMilli
+	a.requestedBytes += ts.requestedBytes
 	for _, c := range ts.containers {
 		if c.cpuMilli != nil {
 			if *c.cpuMilli > 0 {
@@ -287,14 +311,18 @@ func (a *savingsAccumulator) add(ts tailoringSavings) {
 func (a *savingsAccumulator) amounts(p SavingsPricing) SavingsAmounts {
 	out := SavingsAmounts{
 		CPU: CPUSavings{
-			ReclaimableCores: a.reclaimMilli / 1000,
-			IncreaseCores:    a.increaseMilli / 1000,
-			NetCores:         (a.reclaimMilli - a.increaseMilli) / 1000,
+			ReclaimableCores:    a.reclaimMilli / 1000,
+			IncreaseCores:       a.increaseMilli / 1000,
+			NetCores:            (a.reclaimMilli - a.increaseMilli) / 1000,
+			TotalRequestedCores: a.requestedMilli / 1000,
+			NetPercent:          percentOf(a.reclaimMilli-a.increaseMilli, a.requestedMilli),
 		},
 		Memory: MemorySavings{
-			ReclaimableGiB: a.reclaimBytes / bytesPerGiB,
-			IncreaseGiB:    a.increaseBytes / bytesPerGiB,
-			NetGiB:         (a.reclaimBytes - a.increaseBytes) / bytesPerGiB,
+			ReclaimableGiB:    a.reclaimBytes / bytesPerGiB,
+			IncreaseGiB:       a.increaseBytes / bytesPerGiB,
+			NetGiB:            (a.reclaimBytes - a.increaseBytes) / bytesPerGiB,
+			TotalRequestedGiB: a.requestedBytes / bytesPerGiB,
+			NetPercent:        percentOf(a.reclaimBytes-a.increaseBytes, a.requestedBytes),
 		},
 	}
 	if p.CPUPricePerCoreHour == nil && p.MemPricePerGiBHour == nil {
@@ -316,6 +344,15 @@ func (a *savingsAccumulator) amounts(p SavingsPricing) SavingsAmounts {
 	}
 	out.Cost.NetPerHour = out.Cost.ReclaimablePerHour - out.Cost.IncreasePerHour
 	return out
+}
+
+// percentOf returns part as a percentage of total, nil when total is zero.
+func percentOf(part, total float64) *float64 {
+	if total <= 0 {
+		return nil
+	}
+	v := part / total * 100
+	return &v
 }
 
 // buildSavingsReport aggregates the savings of all Tailorings in total, per

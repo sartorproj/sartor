@@ -53,6 +53,69 @@ These Tailoring status fields are returned by `GET /api/v1/tailorings/{namespace
 | `status.lastAnalysis.replicas` | Desired replica count of the target at analysis time, read from kube-state-metrics in the same metrics backend as the usage (`kube_deployment_spec_replicas`, `kube_statefulset_replicas`, or `kube_daemonset_status_desired_number_scheduled` for a DaemonSet), scoped by the Atelier's `prometheus.clusterLabel` and `spec.target.cluster`. Unset (not `0`) when the series is missing or the query fails; `0` means the workload is scaled to zero. With an HPA it is the replica count at that moment. |
 | `FitProfileResolved` condition | `True` (reason `FitProfileResolved`) when the referenced FitProfile was used as configured. `False` with reason `FitProfileFallback` when the analysis fell back: the FitProfile does not exist or cannot be read (the percentile strategy with default parameters is used), its `parameters` are not a JSON object (default parameters are used), or its `strategy` is unknown (the percentile strategy is used). The message says which. |
 | `Analyzed` condition | After a successful analysis: reason `AnalysisComplete`, or `FitProfileFallback` with the fallback in the message when the FitProfile could not be used as configured. |
+| `status.autoscalers[]` | Detected HPAs, VPAs and KEDA ScaledObjects. Besides `kind`, `name`, `updateMode`, `utilizationResources` and `managedBy`: `minReplicas`/`maxReplicas` (KEDA defaults 0/100 when unset), `utilizationTargets` (`resource`, optional `container`, `averageUtilization` in percent) and `otherMetrics` (the other metrics or triggers, for example `External queue_depth`, `cpu AverageValue`, `rabbitmq`). |
+| `status.scaling` | How the recommendation was combined with the autoscalers; see [Scaling summary](#scaling-summary). |
+| `AutoscalerConflict` condition | `True` (reason `AutoscalersConflict`) when two autoscalers act on the same resource (for example a VPA that is not `Off` and an HPA with a Utilization target on cpu) or several HPAs or VPAs target the workload; the message lists them. `False` (reason `NoConflict`) otherwise; absent without autoscalers. |
+| `ScalingPointShifted` condition | `True` when a request an HPA Utilization target is relative to changes and nothing keeps the scaling point. `False` with reason `SizedForUtilizationTarget` when the only changed requests are the ones sized for the target. |
+
+### Scaling Summary
+
+`status.scaling` explains how the per-pod recommendation was adjusted to the workload's autoscalers. It is always set after an analysis; without autoscalers it only carries a `reason`.
+
+- **HPA or ScaledObject with a cpu/memory `Utilization` target**: the request is sized so the target corresponds to the typical per-pod usage at the typical replica count: `request = per-pod usage / target`. The per-pod usage is the median over the analysis window of the usage summed over all pods, divided by the typical (median) replica count; without the summed usage, the busiest pod's median. The replica range comes from the replica history (clamped to the HPA's bounds), else from the current replica count. With `minReplicas = maxReplicas`, no replica count, a typical count of zero or no usage, the request stays sized per pod. Resources without a Utilization target (external, pods, object metrics, `AverageValue`) are sized per pod. Raw write-back leaves the ScaledObject's Utilization trigger for a resource sized this way unchanged.
+- **VPA**: usage is spiky when its P99 is at least twice its median (`peakToBaseline`). For spiky usage the VPA is given `minAllowed` (median + 20%) and `maxAllowed` (observed maximum + 20%, and at least the per-pod request) so it can follow the peaks. With `updateMode` `Auto`, `Recreate` or `InPlaceOrRecreate` the request is lowered to the baseline; with `Initial` it stays per pod; with `Off` the bounds are only recommended (`writeBack: false`). Steady usage keeps the per-pod recommendation. Container policies with `mode: Off` or without the resource in `controlledResources` are respected. With raw write-back the bounds are written into the VPA in the same file: `minAllowed` is set, `maxAllowed` is raised but never lowered. Other write-back types only recommend them.
+- **Conflicts**: a VPA (not `Off`) and an HPA Utilization target on the same resource, several HPAs or several VPAs are flagged in `conflicts` and the `AutoscalerConflict` condition; the affected requests stay sized per pod and the autoscalers are left as they are. An HPA on a DaemonSet is ignored.
+- Memory of a container that was OOM-killed is never lowered below its current request. Safety rails apply to adjusted requests, and write-back still applies the FitProfile's `maxChangePercent`, so a large adjustment is reached over several PRs.
+
+```json
+{
+  "autoscalers": ["HorizontalPodAutoscaler/web", "VerticalPodAutoscaler/web"],
+  "replicas": {"min": 2, "typical": 4, "max": 8, "source": "History"},
+  "alignedResources": ["cpu"],
+  "containers": [
+    {
+      "name": "app",
+      "cpu": {
+        "sizing": "HPAUtilization",
+        "perPodRequest": "300m",
+        "request": "584m",
+        "targetUtilization": 60,
+        "perPodUsage": "350m",
+        "peakToBaseline": "1.12",
+        "reason": "Sized so the 60% cpu Utilization target of HorizontalPodAutoscaler web matches the typical per-pod usage (350m, median of the summed usage per replica) at 4 replicas."
+      },
+      "memory": {
+        "sizing": "VPABaseline",
+        "perPodRequest": "400Mi",
+        "request": "240Mi",
+        "peakToBaseline": "3.50",
+        "spiky": true,
+        "reason": "Spiky memory usage (P99/P50 = 3.50): request lowered to the baseline; VPA web (updateMode Auto) covers peaks up to maxAllowed 1080Mi."
+      }
+    }
+  ],
+  "vpa": [
+    {
+      "name": "web",
+      "updateMode": "Auto",
+      "writeBack": true,
+      "containers": [{"name": "app", "minAllowed": {"memory": "240Mi"}, "maxAllowed": {"memory": "1080Mi"}}],
+      "reason": "minAllowed is the usage baseline and maxAllowed the observed peak with headroom, so the VPA covers the peaks."
+    }
+  ],
+  "reason": "Requests for cpu sized for the Utilization target of HorizontalPodAutoscaler web at 4 replicas (2-8); spiky memory usage: baseline requests with VPA bounds covering the peaks."
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `autoscalers` | The autoscalers considered, as `Kind/name` |
+| `replicas` | Expected replica range `min`/`typical`/`max`, with `source`: `History` (replica history over the analysis window), `Current` (current count only) or `Fixed` (`minReplicas = maxReplicas`) |
+| `alignedResources` | Resources whose requests were sized for an HPA Utilization target |
+| `containers[].cpu`, `containers[].memory` | `sizing` (`PerPod`, `HPAUtilization`, `VPABaseline`), `perPodRequest` (before adjustment), `request` (after), `targetUtilization`, `perPodUsage`, `peakToBaseline`, `spiky` and a `reason` |
+| `vpa[]` | Recommended bounds per VPA and container (`minAllowed`, `maxAllowed`, and the current `currentMinAllowed`/`currentMaxAllowed` when known), `updateMode`, whether write-back applies them (`writeBack`) and why |
+| `conflicts[]` | `resource` (empty for several autoscalers of one kind), the `autoscalers` involved and a `message` |
+| `reason` | One-sentence summary |
 
 ## Savings
 
@@ -76,8 +139,8 @@ There are no default prices: without a price parameter the response has no `cost
   "success": true,
   "data": {
     "totals": {
-      "cpu": {"reclaimableCores": 12.5, "increaseCores": 1.25, "netCores": 11.25},
-      "memory": {"reclaimableGiB": 40, "increaseGiB": 2.5, "netGiB": 37.5},
+      "cpu": {"reclaimableCores": 12.5, "increaseCores": 1.25, "netCores": 11.25, "totalRequestedCores": 90, "netPercent": 12.5},
+      "memory": {"reclaimableGiB": 40, "increaseGiB": 2.5, "netGiB": 37.5, "totalRequestedGiB": 300, "netPercent": 12.5},
       "cost": {"reclaimablePerHour": 0.7, "increasePerHour": 0.0625, "netPerHour": 0.6375}
     },
     "byCluster": [
@@ -99,11 +162,13 @@ There are no default prices: without a price parameter the response has no `cost
 | `byNamespace` | One entry per cluster and **workload** namespace (`spec.target.namespace`, or the Tailoring's namespace), sorted by cluster then namespace |
 | `tailorings` (in groups) | Number of included Tailorings in the group |
 | `cpu`, `memory` | `reclaimable*` sums the decreases, `increase*` the increases (both non-negative), `net*` is reclaimable minus increase |
+| `cpu.totalRequestedCores`, `memory.totalRequestedGiB` | Current requests x replicas, summed over every container of the included Tailorings that has a valid current request (also containers without a recommendation) |
+| `cpu.netPercent`, `memory.netPercent` | `netCores` / `totalRequestedCores` (`netGiB` / `totalRequestedGiB`) x 100: positive when requests shrink, negative when they grow. `null` when the total is zero (no included Tailorings, zero replicas, or no current requests). |
 | `cost` | Only with a price: the same three figures priced per hour |
 | `tailorings` (top level) | How many Tailorings exist, were included and were skipped, by reason |
 | `pricing` | The prices used; absent without a price parameter |
 
-With no Tailorings the response is `200` with zero totals and empty `byCluster` and `byNamespace` lists.
+With no Tailorings the response is `200` with zero totals, `netPercent: null`, and empty `byCluster` and `byNamespace` lists.
 
 ### Status Codes
 

@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -38,6 +40,7 @@ import (
 	"github.com/sartorproj/sartor/internal/gitops/writer"
 	"github.com/sartorproj/sartor/internal/metrics/prometheus"
 	"github.com/sartorproj/sartor/internal/recommender"
+	"github.com/sartorproj/sartor/internal/recommender/scaling"
 	"github.com/sartorproj/sartor/internal/recommender/strategy"
 )
 
@@ -95,6 +98,8 @@ type workloadView struct {
 	// disagreeing and oomKilled are only known in metrics-only mode.
 	disagreeing []string
 	oomKilled   []string
+	// vpaPolicies holds the container policies of each detected VPA by name.
+	vpaPolicies map[string][]scaling.VPAPolicy
 }
 
 func (r *TailoringReconciler) metricsOnly() bool {
@@ -133,11 +138,11 @@ func (r *TailoringReconciler) readWorkload(
 		}
 		return nil, err
 	}
-	view := &workloadView{current: current}
+	view := &workloadView{current: current, vpaPolicies: map[string][]scaling.VPAPolicy{}}
 	if view.quota, err = r.getResourceQuota(ctx, ns); err != nil {
 		logger.Error(err, "Failed to get ResourceQuota")
 	}
-	view.autoscalers = r.detectAutoscalers(ctx, ns, t.Spec.Target, logger)
+	view.autoscalers = r.detectAutoscalersWithPolicies(ctx, ns, t.Spec.Target, logger, view.vpaPolicies)
 	// The replica count only feeds reporting, so a failed query leaves it unset.
 	if promClient != nil {
 		if view.replicas, err = promClient.GetReplicas(ctx, ns, targetWorkload(t)); err != nil {
@@ -164,6 +169,7 @@ func readWorkloadFromMetrics(ctx context.Context, promClient *prometheus.Client,
 		replicas:    st.Replicas,
 		disagreeing: st.Disagreeing,
 		oomKilled:   st.OOMKilled,
+		vpaPolicies: map[string][]scaling.VPAPolicy{},
 	}
 	for name, c := range st.Containers {
 		view.current[name] = autoscalingv1alpha1.ResourceRequirements{
@@ -176,11 +182,21 @@ func readWorkloadFromMetrics(ctx context.Context, promClient *prometheus.Client,
 	}
 	seenSO := map[string]bool{}
 	for _, h := range st.HPAs {
+		var targets []autoscalingv1alpha1.UtilizationTarget
+		for _, res := range h.UtilizationResources {
+			if pct, ok := h.UtilizationTargets[res]; ok {
+				targets = append(targets, autoscalingv1alpha1.UtilizationTarget{Resource: res, AverageUtilization: pct})
+			}
+		}
 		view.autoscalers = append(view.autoscalers, autoscalingv1alpha1.DetectedAutoscaler{
 			Kind:                 autoscalingv1alpha1.AutoscalerKindHPA,
 			Name:                 h.Name,
 			UtilizationResources: h.UtilizationResources,
 			ManagedBy:            h.ScaledObject,
+			MinReplicas:          h.MinReplicas,
+			MaxReplicas:          h.MaxReplicas,
+			UtilizationTargets:   targets,
+			OtherMetrics:         h.OtherMetrics,
 		})
 		if h.ScaledObject != "" && !seenSO[h.ScaledObject] {
 			seenSO[h.ScaledObject] = true
@@ -196,6 +212,7 @@ func readWorkloadFromMetrics(ctx context.Context, promClient *prometheus.Client,
 			Name:       v.Name,
 			UpdateMode: v.UpdateMode,
 		})
+		view.vpaPolicies[v.Name] = metricsVPAPolicies(v)
 	}
 	sortAutoscalers(view.autoscalers)
 	return view, nil
@@ -220,6 +237,18 @@ func sortAutoscalers(a []autoscalingv1alpha1.DetectedAutoscaler) {
 // detectAutoscalers lists the HPAs, VPAs and KEDA ScaledObjects that target
 // the workload. Missing CRDs or permissions only mean nothing is detected.
 func (r *TailoringReconciler) detectAutoscalers(ctx context.Context, ns string, target autoscalingv1alpha1.TargetRef, logger logr.Logger) []autoscalingv1alpha1.DetectedAutoscaler {
+	return r.detectAutoscalersWithPolicies(ctx, ns, target, logger, nil)
+}
+
+// detectAutoscalersWithPolicies is detectAutoscalers that also records the
+// container policies of each VPA in policies, when not nil.
+func (r *TailoringReconciler) detectAutoscalersWithPolicies(
+	ctx context.Context,
+	ns string,
+	target autoscalingv1alpha1.TargetRef,
+	logger logr.Logger,
+	policies map[string][]scaling.VPAPolicy,
+) []autoscalingv1alpha1.DetectedAutoscaler {
 	reader := r.apiReader()
 	var out []autoscalingv1alpha1.DetectedAutoscaler
 	ignore := func(what string, err error) {
@@ -237,11 +266,17 @@ func (r *TailoringReconciler) detectAutoscalers(ctx context.Context, ns string, 
 		if ref.Kind != target.Kind || ref.Name != target.Name {
 			continue
 		}
+		targets, other := hpaMetricDetails(h.Spec.Metrics)
+		maxReplicas := h.Spec.MaxReplicas
 		out = append(out, autoscalingv1alpha1.DetectedAutoscaler{
 			Kind:                 autoscalingv1alpha1.AutoscalerKindHPA,
 			Name:                 h.Name,
 			UtilizationResources: utilizationResources(h.Spec.Metrics),
 			ManagedBy:            h.Labels[labelKEDAScaledObject],
+			MinReplicas:          h.Spec.MinReplicas,
+			MaxReplicas:          &maxReplicas,
+			UtilizationTargets:   targets,
+			OtherMetrics:         other,
 		})
 	}
 
@@ -263,6 +298,9 @@ func (r *TailoringReconciler) detectAutoscalers(ctx context.Context, ns string, 
 		out = append(out, autoscalingv1alpha1.DetectedAutoscaler{
 			Kind: autoscalingv1alpha1.AutoscalerKindVPA, Name: v.GetName(), UpdateMode: mode,
 		})
+		if policies != nil {
+			policies[v.GetName()] = vpaPolicies(v.Object)
+		}
 	}
 
 	scaledObjects := &unstructured.UnstructuredList{}
@@ -279,12 +317,178 @@ func (r *TailoringReconciler) detectAutoscalers(ctx context.Context, ns string, 
 		if kind != target.Kind || name != target.Name {
 			continue
 		}
-		out = append(out, autoscalingv1alpha1.DetectedAutoscaler{
-			Kind: autoscalingv1alpha1.AutoscalerKindScaledObject, Name: so.GetName(),
-		})
+		out = append(out, scaledObjectDetails(so.GetName(), so.Object))
 	}
 	sortAutoscalers(out)
 	return out
+}
+
+// hpaMetricDetails returns an HPA's cpu/memory Utilization targets with a
+// value, and a description of its other metrics.
+func hpaMetricDetails(metrics []autoscalingv2.MetricSpec) ([]autoscalingv1alpha1.UtilizationTarget, []string) {
+	var targets []autoscalingv1alpha1.UtilizationTarget
+	var other []string
+	resourceMetric := func(name corev1.ResourceName, container string, t autoscalingv2.MetricTarget) {
+		if name != corev1.ResourceCPU && name != corev1.ResourceMemory {
+			other = append(other, strings.TrimSpace(fmt.Sprintf("%s %s", name, t.Type)))
+			return
+		}
+		if t.Type != autoscalingv2.UtilizationMetricType {
+			other = append(other, fmt.Sprintf("%s %s", name, t.Type))
+			return
+		}
+		if t.AverageUtilization != nil && *t.AverageUtilization > 0 {
+			targets = append(targets, autoscalingv1alpha1.UtilizationTarget{
+				Resource: string(name), Container: container, AverageUtilization: *t.AverageUtilization,
+			})
+		}
+	}
+	for _, m := range metrics {
+		switch {
+		case m.Type == autoscalingv2.ResourceMetricSourceType && m.Resource != nil:
+			resourceMetric(m.Resource.Name, "", m.Resource.Target)
+		case m.Type == autoscalingv2.ContainerResourceMetricSourceType && m.ContainerResource != nil:
+			resourceMetric(m.ContainerResource.Name, m.ContainerResource.Container, m.ContainerResource.Target)
+		case m.Type == autoscalingv2.PodsMetricSourceType && m.Pods != nil:
+			other = append(other, "Pods "+m.Pods.Metric.Name)
+		case m.Type == autoscalingv2.ObjectMetricSourceType && m.Object != nil:
+			other = append(other, "Object "+m.Object.Metric.Name)
+		case m.Type == autoscalingv2.ExternalMetricSourceType && m.External != nil:
+			other = append(other, "External "+m.External.Metric.Name)
+		default:
+			other = append(other, string(m.Type))
+		}
+	}
+	sortTargets(targets)
+	sort.Strings(other)
+	return targets, other
+}
+
+func sortTargets(t []autoscalingv1alpha1.UtilizationTarget) {
+	sort.SliceStable(t, func(i, j int) bool {
+		if t[i].Resource != t[j].Resource {
+			return t[i].Resource < t[j].Resource
+		}
+		return t[i].Container < t[j].Container
+	})
+}
+
+// KEDA defaults for a ScaledObject without replica counts.
+const (
+	kedaDefaultMinReplicas = 0
+	kedaDefaultMaxReplicas = 100
+)
+
+// scaledObjectDetails reads a KEDA ScaledObject's replica bounds and
+// triggers: cpu/memory triggers with metricType Utilization become targets,
+// the others are listed by type.
+func scaledObjectDetails(name string, obj map[string]interface{}) autoscalingv1alpha1.DetectedAutoscaler {
+	d := autoscalingv1alpha1.DetectedAutoscaler{Kind: autoscalingv1alpha1.AutoscalerKindScaledObject, Name: name}
+	replicas := func(field string, def int32) *int32 {
+		n := def
+		if v, found, _ := unstructured.NestedFieldNoCopy(obj, "spec", field); found {
+			if f, ok := toFloat(v); ok && f >= 0 && f <= math.MaxInt32 {
+				n = int32(f)
+			}
+		}
+		return &n
+	}
+	d.MinReplicas = replicas("minReplicaCount", kedaDefaultMinReplicas)
+	d.MaxReplicas = replicas("maxReplicaCount", kedaDefaultMaxReplicas)
+
+	triggers, _, _ := unstructured.NestedSlice(obj, "spec", "triggers")
+	for _, raw := range triggers {
+		t, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		typ, _, _ := unstructured.NestedString(t, "type")
+		metricType, _, _ := unstructured.NestedString(t, "metricType")
+		if metricType == "" {
+			metricType, _, _ = unstructured.NestedString(t, "metadata", "type")
+		}
+		if typ != "cpu" && typ != "memory" {
+			d.OtherMetrics = append(d.OtherMetrics, typ)
+			continue
+		}
+		value, _, _ := unstructured.NestedString(t, "metadata", "value")
+		pct, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if metricType != "Utilization" || err != nil || pct < 1 || pct > math.MaxInt32 || math.IsNaN(pct) {
+			d.OtherMetrics = append(d.OtherMetrics, strings.TrimSpace(typ+" "+metricType))
+			continue
+		}
+		container, _, _ := unstructured.NestedString(t, "metadata", "containerName")
+		d.UtilizationTargets = append(d.UtilizationTargets, autoscalingv1alpha1.UtilizationTarget{
+			Resource: typ, Container: container, AverageUtilization: int32(math.Round(pct)),
+		})
+		if !contains(d.UtilizationResources, typ) {
+			d.UtilizationResources = append(d.UtilizationResources, typ)
+		}
+	}
+	sort.Strings(d.UtilizationResources)
+	sortTargets(d.UtilizationTargets)
+	sort.Strings(d.OtherMetrics)
+	return d
+}
+
+func toFloat(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case float64:
+		return n, !math.IsNaN(n)
+	}
+	return 0, false
+}
+
+// vpaPolicies reads the container policies of a VPA object.
+func vpaPolicies(obj map[string]interface{}) []scaling.VPAPolicy {
+	raw, _, _ := unstructured.NestedSlice(obj, "spec", "resourcePolicy", "containerPolicies")
+	var out []scaling.VPAPolicy
+	for _, r := range raw {
+		p, ok := r.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		pol := scaling.VPAPolicy{}
+		pol.ContainerName, _, _ = unstructured.NestedString(p, "containerName")
+		pol.Mode, _, _ = unstructured.NestedString(p, "mode")
+		pol.ControlledResources, _, _ = unstructured.NestedStringSlice(p, "controlledResources")
+		pol.MinAllowed = boundValues(p, "minAllowed")
+		pol.MaxAllowed = boundValues(p, "maxAllowed")
+		if pol.ContainerName != "" {
+			out = append(out, pol)
+		}
+	}
+	return out
+}
+
+func boundValues(policy map[string]interface{}, key string) *autoscalingv1alpha1.ResourceValues {
+	m, _, _ := unstructured.NestedMap(policy, key)
+	parse := func(res string) *resource.Quantity {
+		switch v := m[res].(type) {
+		case string:
+			if q, err := resource.ParseQuantity(v); err == nil && q.Sign() >= 0 {
+				return &q
+			}
+		case int64, float64, int32, int:
+			if f, ok := toFloat(v); ok && f >= 0 {
+				if q, err := resource.ParseQuantity(strconv.FormatFloat(f, 'f', -1, 64)); err == nil {
+					return &q
+				}
+			}
+		}
+		return nil
+	}
+	rv := &autoscalingv1alpha1.ResourceValues{CPU: parse("cpu"), Memory: parse("memory")}
+	if rv.CPU == nil && rv.Memory == nil {
+		return nil
+	}
+	return rv
 }
 
 // utilizationResources returns the resources an HPA scales on relative to requests.
@@ -412,8 +616,15 @@ func (r *TailoringReconciler) setScalingPointCondition(
 			cur[rec.ContainerName] = &writer.ResourceValues{CPU: c.Requests.CPU, Memory: c.Requests.Memory}
 		}
 	}
-	shifted := writeback.ShiftedHPAs(t.Status.Autoscalers, writeback.ChangedRequests(updates, cur), keptBy)
+	aligned := alignedResources(t)
+	changed := writeback.WithoutResources(writeback.ChangedRequests(updates, cur), aligned)
+	shifted := writeback.ShiftedHPAs(t.Status.Autoscalers, changed, keptBy)
 	if len(shifted) == 0 {
+		if len(aligned) > 0 {
+			r.setCondition(t, ConditionTypeScalingPointShifted, metav1.ConditionFalse, "SizedForUtilizationTarget",
+				"The "+strings.Join(aligned, "/")+" requests are sized so the HPA Utilization target matches the typical per-pod usage at the typical replica count")
+			return
+		}
 		r.setCondition(t, ConditionTypeScalingPointShifted, metav1.ConditionFalse, "ScalingPointKept",
 			"No HPA Utilization target depends on a changed request")
 		return

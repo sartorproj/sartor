@@ -111,6 +111,28 @@ func (f *yamlFile) ensureMapping(parent *yaml.Node, key string) (*yaml.Node, err
 	return node, nil
 }
 
+// ensureSequence returns the sequence stored under key in parent, creating it if needed.
+func (f *yamlFile) ensureSequence(parent *yaml.Node, key string) (*yaml.Node, error) {
+	idx := findKeyIndex(parent, key)
+	if idx == -1 {
+		f.markStructural(parent)
+		node := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		parent.Content = append(parent.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: tagStr, Value: key}, node)
+		return node, nil
+	}
+	node := parent.Content[idx+1]
+	if node.Kind == yaml.ScalarNode && (node.Tag == "!!null" || node.Value == "" || node.Value == "~") {
+		f.markStructural(parent)
+		*node = yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", LineComment: node.LineComment}
+		return node, nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("expected sequence at key %q", key)
+	}
+	return node, nil
+}
+
 // markStructural records that mapping is about to receive new keys.
 func (f *yamlFile) markStructural(_ *yaml.Node) {
 	f.structural = true

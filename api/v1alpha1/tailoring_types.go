@@ -248,6 +248,229 @@ type DetectedAutoscaler struct {
 	// ManagedBy names the ScaledObject that owns this HPA, if known.
 	// +optional
 	ManagedBy string `json:"managedBy,omitempty"`
+
+	// MinReplicas is the HPA minReplicas (ScaledObject minReplicaCount).
+	// Unset when the source does not expose it.
+	// +optional
+	MinReplicas *int32 `json:"minReplicas,omitempty"`
+
+	// MaxReplicas is the HPA maxReplicas (ScaledObject maxReplicaCount).
+	// Unset when the source does not expose it.
+	// +optional
+	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
+
+	// UtilizationTargets are the cpu/memory Utilization targets with a value.
+	// +optional
+	UtilizationTargets []UtilizationTarget `json:"utilizationTargets,omitempty"`
+
+	// OtherMetrics lists what the HPA or ScaledObject also scales on besides
+	// cpu/memory Utilization targets, e.g. "External", "cpu AverageValue" or
+	// a KEDA trigger type.
+	// +optional
+	OtherMetrics []string `json:"otherMetrics,omitempty"`
+}
+
+// UtilizationTarget is a cpu or memory Utilization target of an HPA or of a
+// KEDA cpu/memory trigger.
+type UtilizationTarget struct {
+	// Resource is cpu or memory.
+	Resource string `json:"resource"`
+
+	// Container is set for a ContainerResource metric (or a KEDA trigger
+	// with containerName); empty means the sum over the pod's containers.
+	// +optional
+	Container string `json:"container,omitempty"`
+
+	// AverageUtilization is the target in percent of the requests.
+	AverageUtilization int32 `json:"averageUtilization"`
+}
+
+// ScalingSizing says how a recommended request was chosen.
+// +kubebuilder:validation:Enum=PerPod;HPAUtilization;VPABaseline
+type ScalingSizing string
+
+const (
+	// ScalingSizingPerPod sizes the request from the per-pod usage only.
+	ScalingSizingPerPod ScalingSizing = "PerPod"
+	// ScalingSizingHPAUtilization sizes the request so that the HPA
+	// Utilization target matches the typical per-pod usage at the typical
+	// replica count.
+	ScalingSizingHPAUtilization ScalingSizing = "HPAUtilization"
+	// ScalingSizingVPABaseline lowers the request to the usage baseline of a
+	// spiky workload and leaves the peaks to the VPA.
+	ScalingSizingVPABaseline ScalingSizing = "VPABaseline"
+)
+
+// ReplicaSource says where a replica range comes from.
+// +kubebuilder:validation:Enum=History;Current;Fixed
+type ReplicaSource string
+
+const (
+	// ReplicaSourceHistory is the replica count over the analysis window.
+	ReplicaSourceHistory ReplicaSource = "History"
+	// ReplicaSourceCurrent is the replica count at analysis time only.
+	ReplicaSourceCurrent ReplicaSource = "Current"
+	// ReplicaSourceFixed is an HPA with minReplicas equal to maxReplicas.
+	ReplicaSourceFixed ReplicaSource = "Fixed"
+)
+
+// ReplicaRange is the replica range a recommendation assumed.
+type ReplicaRange struct {
+	// Min is the lowest replica count observed (within the HPA bounds).
+	// +kubebuilder:validation:Minimum=0
+	Min int32 `json:"min"`
+
+	// Typical is the median replica count, the count requests are sized for.
+	// +kubebuilder:validation:Minimum=0
+	Typical int32 `json:"typical"`
+
+	// Max is the highest replica count observed (within the HPA bounds).
+	// +kubebuilder:validation:Minimum=0
+	Max int32 `json:"max"`
+
+	// Source says where the range comes from.
+	Source ReplicaSource `json:"source"`
+}
+
+// ResourceScaling explains how one resource of one container was sized.
+type ResourceScaling struct {
+	// Sizing is how the recommended request was chosen.
+	Sizing ScalingSizing `json:"sizing"`
+
+	// PerPodRequest is the request sizing from per-pod usage alone gives.
+	// +optional
+	PerPodRequest *resource.Quantity `json:"perPodRequest,omitempty"`
+
+	// Request is the recommended request (status.lastAnalysis).
+	// +optional
+	Request *resource.Quantity `json:"request,omitempty"`
+
+	// TargetUtilization is the HPA Utilization target, in percent, the
+	// request was sized for.
+	// +optional
+	TargetUtilization *int32 `json:"targetUtilization,omitempty"`
+
+	// PerPodUsage is the typical per-pod usage the request was sized from.
+	// +optional
+	PerPodUsage *resource.Quantity `json:"perPodUsage,omitempty"`
+
+	// PeakToBaseline is the ratio of the P99 to the P50 usage, as a decimal
+	// string such as "3.20". Unset when the baseline is zero or unknown.
+	// +optional
+	PeakToBaseline string `json:"peakToBaseline,omitempty"`
+
+	// Spiky is true when the usage peaks far above its baseline.
+	// +optional
+	Spiky bool `json:"spiky,omitempty"`
+
+	// Reason explains the sizing in one sentence.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+}
+
+// ContainerScaling explains how one container's requests were sized.
+type ContainerScaling struct {
+	// Name is the container name.
+	Name string `json:"name"`
+
+	// +optional
+	CPU *ResourceScaling `json:"cpu,omitempty"`
+
+	// +optional
+	Memory *ResourceScaling `json:"memory,omitempty"`
+}
+
+// VPAContainerBounds are recommended VPA minAllowed/maxAllowed values of one
+// container, next to the values the VPA has now.
+type VPAContainerBounds struct {
+	// Name is the container name.
+	Name string `json:"name"`
+
+	// MinAllowed is the recommended minAllowed.
+	// +optional
+	MinAllowed *ResourceValues `json:"minAllowed,omitempty"`
+
+	// MaxAllowed is the recommended maxAllowed.
+	// +optional
+	MaxAllowed *ResourceValues `json:"maxAllowed,omitempty"`
+
+	// CurrentMinAllowed is the VPA's minAllowed for the container, if known.
+	// +optional
+	CurrentMinAllowed *ResourceValues `json:"currentMinAllowed,omitempty"`
+
+	// CurrentMaxAllowed is the VPA's maxAllowed for the container, if known.
+	// +optional
+	CurrentMaxAllowed *ResourceValues `json:"currentMaxAllowed,omitempty"`
+}
+
+// VPARecommendation holds recommended bounds for a VerticalPodAutoscaler.
+type VPARecommendation struct {
+	// Name is the VPA name.
+	Name string `json:"name"`
+
+	// UpdateMode is the VPA update mode.
+	// +optional
+	UpdateMode string `json:"updateMode,omitempty"`
+
+	// WriteBack is true when Git write-back applies the bounds (raw
+	// write-back, updateMode other than Off). With Off they are only
+	// recommended.
+	WriteBack bool `json:"writeBack"`
+
+	// Containers holds the recommended bounds per container.
+	// +optional
+	Containers []VPAContainerBounds `json:"containers,omitempty"`
+
+	// Reason explains the recommendation in one sentence.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+}
+
+// ScalingConflict is a combination of autoscalers that act on the same
+// resource. Sartor flags it and does not try to resolve it.
+type ScalingConflict struct {
+	// Resource is cpu or memory; empty when the conflict is not about one resource.
+	// +optional
+	Resource string `json:"resource,omitempty"`
+
+	// Autoscalers names the conflicting autoscalers as Kind/name.
+	Autoscalers []string `json:"autoscalers"`
+
+	// Message explains the conflict and what Sartor did.
+	Message string `json:"message"`
+}
+
+// ScalingSummary is how the last recommendation accounts for the workload's
+// autoscalers and usage pattern.
+type ScalingSummary struct {
+	// Autoscalers names the autoscalers the recommendation accounted for, as Kind/name.
+	// +optional
+	Autoscalers []string `json:"autoscalers,omitempty"`
+
+	// Replicas is the replica range the recommendation assumed.
+	// +optional
+	Replicas *ReplicaRange `json:"replicas,omitempty"`
+
+	// AlignedResources lists the resources (cpu, memory) whose requests were
+	// sized for an HPA Utilization target. Raw write-back does not rescale
+	// the matching ScaledObject Utilization triggers.
+	// +optional
+	AlignedResources []string `json:"alignedResources,omitempty"`
+
+	// Containers explains the sizing of every container.
+	// +optional
+	Containers []ContainerScaling `json:"containers,omitempty"`
+
+	// VPA holds recommended VPA bounds for spiky workloads.
+	// +optional
+	VPA []VPARecommendation `json:"vpa,omitempty"`
+
+	// Conflicts lists autoscalers that act on the same resource.
+	// +optional
+	Conflicts []ScalingConflict `json:"conflicts,omitempty"`
+
+	// Reason summarizes the recommendation in a short sentence.
+	Reason string `json:"reason"`
 }
 
 // PRState represents the state of a Pull Request.
@@ -285,6 +508,11 @@ type TailoringStatus struct {
 	// the last analysis.
 	// +optional
 	Autoscalers []DetectedAutoscaler `json:"autoscalers,omitempty"`
+
+	// Scaling explains how the last recommendation accounts for the
+	// autoscalers (HPA, KEDA, VPA) and the usage pattern of the workload.
+	// +optional
+	Scaling *ScalingSummary `json:"scaling,omitempty"`
 
 	// OOMKilledContainers lists the containers whose last termination was an
 	// OOM kill at the last analysis (from metrics). Their memory is not lowered.

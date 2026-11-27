@@ -136,7 +136,7 @@ func TestParseSnapshot_Agreeing(t *testing.T) {
 	assert.Equal(t, "8", st.Quota.CPULimit.String())
 	assert.Equal(t, "16Gi", st.Quota.MemoryLimit.String())
 	assert.Equal(t, []HPAInfo{
-		{Name: "keda-hpa-web", UtilizationResources: []string{"cpu"}, ScaledObject: "web"},
+		{Name: "keda-hpa-web", UtilizationResources: []string{"cpu"}, UtilizationTargets: map[string]int32{"cpu": 80}, ScaledObject: "web"},
 		{Name: "plain"},
 	}, st.HPAs)
 	assert.Equal(t, []VPAInfo{{Name: "web", UpdateMode: "Initial"}}, st.VPAs)

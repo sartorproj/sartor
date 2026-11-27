@@ -119,10 +119,11 @@ func TestDetectAutoscalers_Kubernetes(t *testing.T) {
 	r := &TailoringReconciler{Client: c}
 
 	got := r.detectAutoscalers(context.Background(), "blue", autoscalingv1alpha1.TargetRef{Kind: "Deployment", Name: "web"}, logr.Discard())
+	five, zero, hundred := int32(5), int32(0), int32(100)
 	assert.Equal(t, []autoscalingv1alpha1.DetectedAutoscaler{
-		{Kind: autoscalingv1alpha1.AutoscalerKindHPA, Name: "keda-hpa-web", UtilizationResources: []string{"memory"}, ManagedBy: "web"},
-		{Kind: autoscalingv1alpha1.AutoscalerKindHPA, Name: "web", UtilizationResources: []string{"cpu"}},
-		{Kind: autoscalingv1alpha1.AutoscalerKindScaledObject, Name: "web"},
+		{Kind: autoscalingv1alpha1.AutoscalerKindHPA, Name: "keda-hpa-web", UtilizationResources: []string{"memory"}, ManagedBy: "web", MaxReplicas: &five},
+		{Kind: autoscalingv1alpha1.AutoscalerKindHPA, Name: "web", UtilizationResources: []string{"cpu"}, MaxReplicas: &five, OtherMetrics: []string{"memory AverageValue"}},
+		{Kind: autoscalingv1alpha1.AutoscalerKindScaledObject, Name: "web", MinReplicas: &zero, MaxReplicas: &hundred},
 		{Kind: autoscalingv1alpha1.AutoscalerKindVPA, Name: "web-auto", UpdateMode: "Auto"},
 		{Kind: autoscalingv1alpha1.AutoscalerKindVPA, Name: "web-off", UpdateMode: "Off"},
 	}, got)
@@ -133,8 +134,9 @@ func TestDetectAutoscalers_CRDsNotInstalled(t *testing.T) {
 		WithObjects(hpa("blue", "web", "web", nil, resourceMetric(corev1.ResourceCPU, autoscalingv2.UtilizationMetricType))).Build()
 	r := &TailoringReconciler{Client: c}
 	got := r.detectAutoscalers(context.Background(), "blue", autoscalingv1alpha1.TargetRef{Kind: "Deployment", Name: "web"}, logr.Discard())
+	five := int32(5)
 	assert.Equal(t, []autoscalingv1alpha1.DetectedAutoscaler{
-		{Kind: autoscalingv1alpha1.AutoscalerKindHPA, Name: "web", UtilizationResources: []string{"cpu"}},
+		{Kind: autoscalingv1alpha1.AutoscalerKindHPA, Name: "web", UtilizationResources: []string{"cpu"}, MaxReplicas: &five},
 	}, got)
 }
 
