@@ -19,9 +19,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,19 +39,25 @@ import (
 	"github.com/sartorproj/sartor/internal/metrics/prometheus"
 	"github.com/sartorproj/sartor/internal/opencost"
 	"github.com/sartorproj/sartor/internal/recommender"
+	"github.com/sartorproj/sartor/internal/recommender/strategy"
 )
 
 // Handler provides HTTP handlers for the Sartor API.
 type Handler struct {
 	client     client.Client
 	calculator *recommender.Calculator
+	// forecastSlots bounds the number of concurrent forecast fits.
+	forecastSlots   chan struct{}
+	forecastTimeout time.Duration
 }
 
 // NewHandler creates a new API Handler.
 func NewHandler(c client.Client) *Handler {
 	return &Handler{
-		client:     c,
-		calculator: recommender.NewCalculator(),
+		client:          c,
+		calculator:      recommender.NewCalculator(),
+		forecastSlots:   make(chan struct{}, maxConcurrentForecasts),
+		forecastTimeout: defaultForecastTimeout,
 	}
 }
 
@@ -827,6 +837,67 @@ func (h *Handler) GetMetrics(w http.ResponseWriter, r *http.Request) {
 // maxTimeSeriesWindow bounds the range of time series queries.
 const maxTimeSeriesWindow = 31 * 24 * time.Hour
 
+// bytesPerMiB converts memory usage to the MiB returned by the API.
+const bytesPerMiB = 1024 * 1024
+
+// containerQuery identifies the container usage queried by the Prometheus
+// time series endpoints.
+type containerQuery struct {
+	namespace     string
+	workload      prometheus.Workload
+	containerName string
+	resourceType  string
+	window        time.Duration
+}
+
+// parseContainerQuery reads and validates the query parameters shared by the
+// Prometheus time series endpoints. window defaults to defaultWindow. Every
+// error is a client error.
+func parseContainerQuery(r *http.Request, defaultWindow time.Duration) (containerQuery, error) {
+	query := r.URL.Query()
+	// name is the workload name; podNamePrefix is the legacy parameter name.
+	workloadName := query.Get("name")
+	if workloadName == "" {
+		workloadName = query.Get("podNamePrefix")
+	}
+	kind := query.Get("kind")
+	if kind == "" {
+		kind = prometheus.KindDeployment
+	}
+	q := containerQuery{
+		namespace:     query.Get("namespace"),
+		workload:      prometheus.Workload{Kind: kind, Name: workloadName, Cluster: query.Get("cluster")},
+		containerName: query.Get("containerName"),
+		resourceType:  query.Get("resourceType"),
+		window:        defaultWindow,
+	}
+
+	if q.namespace == "" || workloadName == "" || q.containerName == "" || q.resourceType == "" {
+		return q, fmt.Errorf("missing required parameters: namespace, name (or podNamePrefix), containerName, resourceType")
+	}
+	if _, err := prometheus.PodNameRegex(q.workload); err != nil {
+		return q, err
+	}
+	if err := prometheus.ValidateQueryTarget(q.namespace, q.workload, q.containerName); err != nil {
+		return q, err
+	}
+	if q.resourceType != prometheus.ResourceTypeCPU && q.resourceType != prometheus.ResourceTypeMemory {
+		return q, fmt.Errorf("resourceType must be cpu or memory")
+	}
+
+	if windowStr := query.Get("window"); windowStr != "" {
+		var err error
+		q.window, err = time.ParseDuration(windowStr)
+		if err != nil {
+			return q, fmt.Errorf("invalid window duration: %v", err)
+		}
+		if q.window <= 0 || q.window > maxTimeSeriesWindow {
+			return q, fmt.Errorf("window must be between 0 and %s", maxTimeSeriesWindow)
+		}
+	}
+	return q, nil
+}
+
 // GetPrometheusMetrics returns Prometheus time series metrics for a specific container.
 // Query parameters: namespace, name (or legacy podNamePrefix), kind
 // (Deployment, StatefulSet or DaemonSet; default Deployment), containerName,
@@ -836,58 +907,20 @@ func (h *Handler) GetPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	// Parse query parameters
-	namespace := r.URL.Query().Get("namespace")
-	// workloadName is the workload name; podNamePrefix is the legacy parameter name.
-	workloadName := r.URL.Query().Get("name")
-	if workloadName == "" {
-		workloadName = r.URL.Query().Get("podNamePrefix")
-	}
-	kind := r.URL.Query().Get("kind")
-	if kind == "" {
-		kind = prometheus.KindDeployment
-	}
-	containerName := r.URL.Query().Get("containerName")
-	resourceType := r.URL.Query().Get("resourceType") // "cpu" or "memory"
-	windowStr := r.URL.Query().Get("window")
-
-	if namespace == "" || workloadName == "" || containerName == "" || resourceType == "" {
-		writeError(w, http.StatusBadRequest, "Missing required parameters: namespace, name (or podNamePrefix), containerName, resourceType")
-		return
-	}
-	workload := prometheus.Workload{Kind: kind, Name: workloadName, Cluster: r.URL.Query().Get("cluster")}
-	if _, err := prometheus.PodNameRegex(workload); err != nil {
+	q, err := parseContainerQuery(r, time.Hour)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	if err := prometheus.ValidateQueryTarget(namespace, workload, containerName); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if resourceType != prometheus.ResourceTypeCPU && resourceType != prometheus.ResourceTypeMemory {
-		writeError(w, http.StatusBadRequest, "resourceType must be cpu or memory")
-		return
-	}
-
-	// Parse window duration (default to 1 hour)
-	window := 1 * time.Hour
-	if windowStr != "" {
-		var err error
-		window, err = time.ParseDuration(windowStr)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid window duration: %v", err))
-			return
-		}
-		if window <= 0 || window > maxTimeSeriesWindow {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("window must be between 0 and %s", maxTimeSeriesWindow))
-			return
-		}
 	}
 
 	// Get Atelier
 	atelier, err := h.getAtelier(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := prometheus.ValidateCluster(atelier.Spec.Prometheus.ClusterLabel, q.workload.Cluster); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -899,7 +932,7 @@ func (h *Handler) GetPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Query Prometheus for time series data
-	points, err := promClient.GetTimeSeriesMetrics(ctx, namespace, workload, containerName, resourceType, window)
+	points, err := promClient.GetTimeSeriesMetrics(ctx, q.namespace, q.workload, q.containerName, q.resourceType, q.window)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get time series metrics: %v", err))
 		return
@@ -909,6 +942,226 @@ func (h *Handler) GetPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 		Success: true,
 		Data:    points,
 	})
+}
+
+const (
+	defaultForecastWindow     = 7 * 24 * time.Hour
+	defaultForecastHorizon    = 24 * time.Hour
+	defaultForecastConfidence = 0.95
+	// defaultForecastTimeout stays below the server's 15s WriteTimeout, so a
+	// timeout is still answered with a JSON error.
+	defaultForecastTimeout = 12 * time.Second
+	maxConcurrentForecasts = 4
+)
+
+// ForecastResponse is the data returned by GetPrometheusForecast. Values are
+// in cores for CPU and in MiB for memory, as for GetPrometheusMetrics.
+type ForecastResponse struct {
+	// History is the usage history the forecast is based on, at the
+	// strategy's query resolution.
+	History []prometheus.TimeSeriesPoint `json:"history"`
+	// Forecast is empty when the history cannot be forecast.
+	Forecast []strategy.ForecastPoint `json:"forecast"`
+	// Level is the confidence level of the prediction interval.
+	Level float64 `json:"level"`
+	// Model is the fitted model, empty without a forecast.
+	Model string `json:"model"`
+	// SampleInterval is the interval of the forecast points, or of the
+	// history query without a forecast.
+	SampleInterval string `json:"sampleInterval"`
+	// FallbackReason explains why there is no forecast.
+	FallbackReason string `json:"fallbackReason,omitempty"`
+}
+
+// GetPrometheusForecast forecasts a container's CPU or memory usage with the
+// ARIMA strategy. It accepts the query parameters of GetPrometheusMetrics
+// (window defaults to 168h), plus horizon (default 24h, at most 168h, not
+// longer than window), confidence (default 0.95, in (0, 1)) and the model
+// parameters mode, seasonal, order, seasonalOrder and seasonalPeriod of the
+// ARIMA strategy. A history that cannot be forecast is reported in
+// fallbackReason, not as an error.
+func (h *Handler) GetPrometheusForecast(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	q, err := parseContainerQuery(r, defaultForecastWindow)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cfg, horizon, confidence, err := parseForecastConfig(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if q.window < horizon {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("window (%s) must not be shorter than horizon (%s)", q.window, horizon))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), h.forecastTimeout)
+	defer cancel()
+	fail := func(status int, message string) {
+		if err := ctx.Err(); err != nil {
+			status, message = http.StatusGatewayTimeout, fmt.Sprintf("Forecast cancelled: %v", err)
+		}
+		writeError(w, status, message)
+	}
+
+	atelier, err := h.getAtelier(ctx)
+	if err != nil {
+		fail(http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := prometheus.ValidateCluster(atelier.Spec.Prometheus.ClusterLabel, q.workload.Cluster); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	promClient, err := h.createPrometheusClient(ctx, atelier)
+	if err != nil {
+		fail(http.StatusInternalServerError, fmt.Sprintf("Failed to create Prometheus client: %v", err))
+		return
+	}
+
+	arima := strategy.NewARIMAStrategy(strategy.DefaultARIMASampleInterval)
+	step := arima.HistoryStep(q.window)
+	histories, err := promClient.GetContainerHistory(ctx, q.namespace, q.workload, q.window, step)
+	if err != nil {
+		fail(http.StatusInternalServerError, fmt.Sprintf("Failed to get usage history: %v", err))
+		return
+	}
+	history, scale := histories[q.containerName].CPU, 1.0
+	if q.resourceType == prometheus.ResourceTypeMemory {
+		history, scale = histories[q.containerName].Memory, 1.0/bytesPerMiB
+	}
+
+	data := ForecastResponse{
+		History:        usagePoints(history, scale),
+		Forecast:       []strategy.ForecastPoint{},
+		Level:          confidence,
+		SampleInterval: step.String(),
+	}
+	fc, err := h.runForecast(ctx, arima, history, cfg)
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		fail(http.StatusGatewayTimeout, fmt.Sprintf("Forecast cancelled: %v", err))
+		return
+	case err != nil:
+		data.FallbackReason = err.Error()
+	default:
+		data.Model = fc.Model
+		data.SampleInterval = fc.SampleInterval.String()
+		for _, p := range fc.Points {
+			data.Forecast = append(data.Forecast, strategy.ForecastPoint{
+				Timestamp: p.Timestamp, Value: p.Value * scale, Lower: p.Lower * scale, Upper: p.Upper * scale,
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, Response{Success: true, Data: data})
+}
+
+// parseForecastConfig reads and validates the forecast query parameters.
+func parseForecastConfig(query url.Values) (strategy.ForecastConfig, time.Duration, float64, error) {
+	horizon, confidence := defaultForecastHorizon, defaultForecastConfidence
+	if v := query.Get("horizon"); v != "" {
+		var err error
+		if horizon, err = time.ParseDuration(v); err != nil {
+			return strategy.ForecastConfig{}, 0, 0, fmt.Errorf("invalid horizon duration: %v", err)
+		}
+	}
+	if v := query.Get("confidence"); v != "" {
+		var err error
+		if confidence, err = strconv.ParseFloat(v, 64); err != nil {
+			return strategy.ForecastConfig{}, 0, 0, fmt.Errorf("invalid confidence: %q is not a number", v)
+		}
+	}
+	cfg, err := strategy.NewForecastConfig(horizon, confidence, forecastModelParameters(query))
+	return cfg, horizon, confidence, err
+}
+
+// forecastModelParameters converts the model query parameters to ARIMA
+// FitProfile parameters, which the strategy validates: order and
+// seasonalOrder are comma-separated integers, seasonal is a boolean.
+// Values that do not convert are passed on as strings, so they are rejected.
+func forecastModelParameters(query url.Values) map[string]interface{} {
+	params := make(map[string]interface{})
+	for _, key := range strategy.ARIMAForecastModelKeys {
+		if !query.Has(key) {
+			continue
+		}
+		value := query.Get(key)
+		params[key] = value
+		switch key {
+		case "order", "seasonalOrder":
+			var order []interface{}
+			for _, item := range strings.Split(value, ",") {
+				if n, err := strconv.Atoi(strings.TrimSpace(item)); err == nil {
+					order = append(order, n)
+				} else {
+					order = append(order, item)
+				}
+			}
+			params[key] = order
+		case "seasonal":
+			if b, err := strconv.ParseBool(value); err == nil {
+				params[key] = b
+			}
+		}
+	}
+	return params
+}
+
+// runForecast fits the model in a goroutine, so the request returns when ctx
+// is done even if a fit does not. A fit holds one of the forecast slots until
+// it returns, which bounds the CPU used by fits whose request has gone.
+func (h *Handler) runForecast(
+	ctx context.Context,
+	s *strategy.ARIMAStrategy,
+	history []prometheus.TimeSeriesPoint,
+	cfg strategy.ForecastConfig,
+) (strategy.Forecast, error) {
+	select {
+	case h.forecastSlots <- struct{}{}:
+	case <-ctx.Done():
+		return strategy.Forecast{}, fmt.Errorf("waiting for a forecast slot: %w", ctx.Err())
+	}
+	type result struct {
+		fc  strategy.Forecast
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer func() { <-h.forecastSlots }()
+		var res result
+		// A panic in this goroutine would take down the server.
+		defer func() {
+			if p := recover(); p != nil {
+				res.err = fmt.Errorf("forecast failed: %v", p)
+			}
+			done <- res
+		}()
+		res.fc, res.err = s.Forecast(ctx, history, cfg)
+	}()
+	select {
+	case res := <-done:
+		return res.fc, res.err
+	case <-ctx.Done():
+		return strategy.Forecast{}, ctx.Err()
+	}
+}
+
+// usagePoints returns the finite, non-negative samples of history multiplied
+// by scale. JSON cannot encode NaN or infinite values.
+func usagePoints(history []prometheus.TimeSeriesPoint, scale float64) []prometheus.TimeSeriesPoint {
+	points := make([]prometheus.TimeSeriesPoint, 0, len(history))
+	for _, p := range history {
+		if math.IsNaN(p.Value) || math.IsInf(p.Value, 0) || p.Value < 0 {
+			continue
+		}
+		points = append(points, prometheus.TimeSeriesPoint{Timestamp: p.Timestamp, Value: p.Value * scale})
+	}
+	return points
 }
 
 // notFoundError represents a not found error.
@@ -1509,6 +1762,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Metrics
 	mux.HandleFunc("/api/v1/metrics/", h.GetMetrics)
 	mux.HandleFunc("/api/v1/prometheus/metrics", h.GetPrometheusMetrics)
+	mux.HandleFunc("/api/v1/prometheus/forecast", h.GetPrometheusForecast)
 
 	// OpenCost
 	mux.HandleFunc("/api/v1/opencost/allocations", h.GetOpenCostAllocations)

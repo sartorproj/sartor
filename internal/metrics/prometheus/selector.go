@@ -114,7 +114,7 @@ func newPodSelector(namespace string, w Workload, clusterLabel string) (podSelec
 	if err := ValidateQueryTarget(namespace, w, ""); err != nil {
 		return podSelector{}, err
 	}
-	if err := validateCluster(clusterLabel, w.Cluster); err != nil {
+	if err := ValidateCluster(clusterLabel, w.Cluster); err != nil {
 		return podSelector{}, err
 	}
 	re, err := PodNameRegex(w)
@@ -126,9 +126,9 @@ func newPodSelector(namespace string, w Workload, clusterLabel string) (podSelec
 
 var labelNameRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
-// validateCluster checks the cluster label name and requires a cluster value
+// ValidateCluster checks the cluster label name and requires a cluster value
 // when a label is configured, so a query can never span clusters.
-func validateCluster(clusterLabel, cluster string) error {
+func ValidateCluster(clusterLabel, cluster string) error {
 	if clusterLabel == "" {
 		if cluster != "" {
 			// Without the label the query would mix series of every cluster.
