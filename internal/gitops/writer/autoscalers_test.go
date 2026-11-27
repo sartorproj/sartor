@@ -362,3 +362,156 @@ spec:
 	assert.Empty(t, skipped)
 	assert.Contains(t, string(out), "injected-proxy", "without the option missing containers are appended")
 }
+
+func updateWebWith(t *testing.T, content string, updates []ResourceUpdate, opts RawOptions) *RawResult {
+	t.Helper()
+	res, err := NewRawWriter().Update([]byte(content), ManifestTarget{Kind: "Deployment", Name: "web"}, updates, opts)
+	require.NoError(t, err)
+	return res
+}
+
+func appBounds(minCPU, maxCPU string) map[string]map[string]VPABounds {
+	return map[string]map[string]VPABounds{"web": {"app": {
+		MinAllowed: &ResourceValues{CPU: qty(minCPU)},
+		MaxAllowed: &ResourceValues{CPU: qty(maxCPU)},
+	}}}
+}
+
+// The existing policy has cpu 400m-1: minAllowed is set to the recommended
+// 120m, a narrower maxAllowed is raised to the recommended 1800m.
+func TestUpdate_VPABoundsNarrowerExisting(t *testing.T) {
+	res := updateWebWith(t, webDeployment+vpaDoc("web", "Auto", "web"), appUpdate("120m", "256Mi"),
+		RawOptions{VPABounds: appBounds("120m", "1800m")})
+	out := string(res.Content)
+	policy := []string{"spec", "resourcePolicy", "containerPolicies", "0"}
+	assert.Equal(t, "120m", lookup(t, out, 1, append(policy, "minAllowed", "cpu")...))
+	assert.Equal(t, "1800m", lookup(t, out, 1, append(policy, "maxAllowed", "cpu")...))
+	assert.Equal(t, "200Mi", lookup(t, out, 1, append(policy, "minAllowed", "memory")...), "no memory recommendation: unchanged")
+	require.Len(t, res.Autoscalers, 1)
+	assert.True(t, res.Autoscalers[0].Adjusted)
+	details := strings.Join(res.Autoscalers[0].Details, "\n")
+	assert.Contains(t, details, "minAllowed.cpu 400m -> 120m (container app)")
+	assert.Contains(t, details, "maxAllowed.cpu 1 -> 1800m (container app)")
+
+	again := updateWebWith(t, out, appUpdate("120m", "256Mi"), RawOptions{VPABounds: appBounds("120m", "1800m")})
+	assert.Equal(t, out, string(again.Content), "idempotent")
+	assert.False(t, again.Autoscalers[0].Adjusted)
+}
+
+func TestUpdate_VPABoundsWiderMaxKept(t *testing.T) {
+	res := updateWebWith(t, webDeployment+vpaDoc("web", "Auto", "web"), appUpdate("450m", "256Mi"),
+		RawOptions{VPABounds: appBounds("450m", "800m")})
+	out := string(res.Content)
+	policy := []string{"spec", "resourcePolicy", "containerPolicies", "0"}
+	assert.Equal(t, "450m", lookup(t, out, 1, append(policy, "minAllowed", "cpu")...))
+	assert.Equal(t, "1", lookup(t, out, 1, append(policy, "maxAllowed", "cpu")...), "a wider maxAllowed is never narrowed")
+	assert.Contains(t, strings.Join(res.Autoscalers[0].Details, "\n"), "maxAllowed.cpu 1 kept (wider than the recommended 800m)")
+}
+
+func TestUpdate_VPABoundsUpdateModeOff(t *testing.T) {
+	in := webDeployment + vpaDoc("web", "Off", "web")
+	res := updateWebWith(t, in, appUpdate("500m", "256Mi"), RawOptions{VPABounds: appBounds("120m", "1800m")})
+	assert.Equal(t, in, string(res.Content))
+	assert.False(t, res.Autoscalers[0].Adjusted)
+}
+
+func TestUpdate_VPABoundsWithoutPolicies(t *testing.T) {
+	doc := `---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: web
+spec:
+  targetRef:
+    kind: Deployment
+    name: web
+  updatePolicy:
+    updateMode: Recreate
+`
+	res := updateWebWith(t, webDeployment+doc, appUpdate("120m", "256Mi"), RawOptions{VPABounds: appBounds("120m", "1800m")})
+	out := string(res.Content)
+	policy := []string{"spec", "resourcePolicy", "containerPolicies", "0"}
+	assert.Equal(t, "app", lookup(t, out, 1, append(policy, "containerName")...))
+	assert.Equal(t, "120m", lookup(t, out, 1, append(policy, "minAllowed", "cpu")...))
+	assert.Equal(t, "1800m", lookup(t, out, 1, append(policy, "maxAllowed", "cpu")...))
+	assert.True(t, res.Autoscalers[0].Adjusted)
+	assert.Contains(t, res.Autoscalers[0].Details, "added a containerPolicy for container app")
+	assert.Equal(t, "Recreate", lookup(t, out, 1, "spec", "updatePolicy", "updateMode"))
+}
+
+func TestUpdate_VPABoundsCopiesWildcardPolicy(t *testing.T) {
+	doc := `---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: web
+spec:
+  targetRef:
+    kind: Deployment
+    name: web
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledResources: ["memory"]
+        maxAllowed:
+          memory: 2Gi
+`
+	bounds := map[string]map[string]VPABounds{"web": {"app": {
+		MinAllowed: &ResourceValues{CPU: qty("120m"), Memory: qty("100Mi")},
+		MaxAllowed: &ResourceValues{CPU: qty("1800m"), Memory: qty("1Gi")},
+	}}}
+	res := updateWebWith(t, webDeployment+doc, appUpdate("500m", "100Mi"), RawOptions{VPABounds: bounds})
+	out := string(res.Content)
+	assert.Equal(t, "*", lookup(t, out, 1, "spec", "resourcePolicy", "containerPolicies", "0", "containerName"))
+	assert.Equal(t, "2Gi", lookup(t, out, 1, "spec", "resourcePolicy", "containerPolicies", "0", "maxAllowed", "memory"), "the * policy is not changed")
+	added := []string{"spec", "resourcePolicy", "containerPolicies", "1"}
+	assert.Equal(t, "app", lookup(t, out, 1, append(added, "containerName")...))
+	assert.Equal(t, "memory", lookup(t, out, 1, append(added, "controlledResources", "0")...), "copied from *")
+	assert.Equal(t, "100Mi", lookup(t, out, 1, append(added, "minAllowed", "memory")...))
+	assert.Equal(t, "2Gi", lookup(t, out, 1, append(added, "maxAllowed", "memory")...), "the wider copied maxAllowed is kept")
+	assert.NotContains(t, out, "1800m", "cpu is not controlled")
+}
+
+func TestUpdate_VPABoundsPolicyModeOff(t *testing.T) {
+	for name, policy := range map[string]string{
+		"own policy": `      - containerName: app
+        mode: "Off"
+`,
+		"wildcard policy": `      - containerName: "*"
+        mode: "Off"
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc := `---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: web
+spec:
+  targetRef:
+    kind: Deployment
+    name: web
+  resourcePolicy:
+    containerPolicies:
+` + policy
+			in := webDeployment + doc
+			res := updateWebWith(t, in, appUpdate("500m", "256Mi"), RawOptions{VPABounds: appBounds("120m", "1800m")})
+			assert.NotContains(t, string(res.Content), "1800m")
+			assert.False(t, res.Autoscalers[0].Adjusted)
+			assert.Contains(t, strings.Join(res.Autoscalers[0].Details, "\n"), "policy mode is Off")
+		})
+	}
+}
+
+// Requests sized for the cpu Utilization target keep the cpu trigger as it
+// is; the memory Utilization triggers are still rescaled.
+func TestUpdate_ScaledObjectKeepUtilizationTargets(t *testing.T) {
+	res := updateWebWith(t, webDeployment+scaledObject, appUpdate("1", "512Mi"), RawOptions{KeepUtilizationTargets: []string{"cpu"}})
+	out := string(res.Content)
+	assert.Equal(t, "60", lookup(t, out, 1, "spec", "triggers", "0", "metadata", "value"))
+	assert.Equal(t, "40", lookup(t, out, 1, "spec", "triggers", "3", "metadata", "value"))
+	note := res.Autoscalers[0]
+	assert.True(t, note.Adjusted)
+	assert.True(t, note.KeepsScalingPoint)
+	assert.Contains(t, strings.Join(note.Details, "\n"), "sized for")
+}

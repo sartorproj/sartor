@@ -53,6 +53,17 @@ func ChangedRequests(updates []writer.ResourceUpdate, current map[string]*writer
 	return out
 }
 
+// WithoutResources returns changed without the resources in drop.
+func WithoutResources(changed, drop []string) []string {
+	var out []string
+	for _, r := range changed {
+		if !slices.Contains(drop, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // ShiftedHPAs returns the HPAs whose cpu/memory Utilization target is
 // relative to a changed request, so the same percentage now means a different
 // absolute usage. HPAs managed by a ScaledObject listed in keptBy are excluded.
@@ -111,14 +122,37 @@ func autoscalingSection(req Request, r *rendered) string {
 	}
 
 	changed := ChangedRequests(req.Updates, req.Current)
-	shifted := ShiftedHPAs(req.Autoscalers, changed, keptBy)
+	shifted := ShiftedHPAs(req.Autoscalers, WithoutResources(changed, req.AlignedResources), keptBy)
 	for _, a := range req.Autoscalers {
 		if res, ok := shifted[a.Name]; ok && a.Kind == autoscalingv1alpha1.AutoscalerKindHPA {
 			lines = append(lines, fmt.Sprintf("- **HorizontalPodAutoscaler `%s`: scaling point shifts.** It targets %s utilization, which is relative to requests; with the new requests the same percentage means a different absolute usage. Review its targets.",
 				a.Name, strings.Join(res, "/")))
 		}
 	}
+	if len(req.AlignedResources) > 0 {
+		lines = append(lines, fmt.Sprintf("- The %s requests are sized so the Utilization target matches the typical per-pod usage at the typical replica count; Utilization targets are kept as they are.",
+			strings.Join(req.AlignedResources, "/")))
+	}
+	for _, name := range sortedKeys(req.VPABounds) {
+		if !inFile[string(autoscalingv1alpha1.AutoscalerKindVPA)+"/"+name] {
+			lines = append(lines, fmt.Sprintf("- VerticalPodAutoscaler `%s`: minAllowed/maxAllowed are recommended for its spiky usage (see the Tailoring status `scaling.vpa`), but it is not in `%s`.",
+				name, req.Path))
+		}
+	}
 
+	return renderAutoscalingSection(lines, r, req.Path)
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func renderAutoscalingSection(lines []string, r *rendered, path string) string {
 	var b strings.Builder
 	if len(lines) > 0 {
 		b.WriteString("\n\n### Autoscalers\n\n")
@@ -128,7 +162,7 @@ func autoscalingSection(req Request, r *rendered) string {
 	if len(r.skipped) > 0 {
 		b.WriteString("\n\n### Skipped containers\n\n")
 		for _, c := range r.skipped {
-			fmt.Fprintf(&b, "- `%s`: runs in the pods but is not in `%s` (for example an injected sidecar); not changed.\n", c, req.Path)
+			fmt.Fprintf(&b, "- `%s`: runs in the pods but is not in `%s` (for example an injected sidecar); not changed.\n", c, path)
 		}
 	}
 	return b.String()

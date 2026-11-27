@@ -56,6 +56,12 @@ func TestChangedRequests(t *testing.T) {
 	assert.Empty(t, ChangedRequests(limitsOnly, current))
 }
 
+func TestWithoutResources(t *testing.T) {
+	assert.Equal(t, []string{"memory"}, WithoutResources([]string{"cpu", "memory"}, []string{"cpu"}))
+	assert.Empty(t, WithoutResources([]string{"cpu"}, []string{"cpu", "memory"}))
+	assert.Equal(t, []string{"cpu"}, WithoutResources([]string{"cpu"}, nil))
+}
+
 func TestShiftedHPAs(t *testing.T) {
 	detected := []autoscalingv1alpha1.DetectedAutoscaler{
 		{Kind: autoscalingv1alpha1.AutoscalerKindHPA, Name: "cpu-hpa", UtilizationResources: []string{"cpu"}},
@@ -144,6 +150,25 @@ func TestAutoscalingSection(t *testing.T) {
 				"### Skipped containers",
 				"`injected-proxy`: runs in the pods but is not in `a.yaml`",
 			},
+		},
+		{
+			name: "requests sized for the HPA Utilization target",
+			req: Request{Path: "a.yaml", Updates: cpuUpdate("300m"), Current: map[string]*writer.ResourceValues{"api": {CPU: q("100m")}},
+				AlignedResources: []string{"cpu"},
+				Autoscalers: []autoscalingv1alpha1.DetectedAutoscaler{
+					{Kind: autoscalingv1alpha1.AutoscalerKindHPA, Name: "api", UtilizationResources: []string{"cpu"}},
+				}},
+			want:    []string{"The cpu requests are sized so the Utilization target matches the typical per-pod usage"},
+			notWant: []string{"scaling point shifts"},
+		},
+		{
+			name: "recommended VPA bounds for a VPA outside the file",
+			req: Request{Path: "values.yaml", Updates: cpuUpdate("300m"),
+				VPABounds: map[string]map[string]writer.VPABounds{"api": {"api": {MaxAllowed: &writer.ResourceValues{CPU: q("1")}}}},
+				Autoscalers: []autoscalingv1alpha1.DetectedAutoscaler{
+					{Kind: autoscalingv1alpha1.AutoscalerKindVPA, Name: "api", UpdateMode: "Auto"},
+				}},
+			want: []string{"VerticalPodAutoscaler `api`: minAllowed/maxAllowed are recommended for its spiky usage (see the Tailoring status `scaling.vpa`), but it is not in `values.yaml`."},
 		},
 	}
 	for _, tt := range tests {
