@@ -85,6 +85,15 @@ type TailoringSummary struct {
 	PRState        string `json:"prState,omitempty"`
 	PRNumber       *int   `json:"prNumber,omitempty"`
 	PRUrl          string `json:"prUrl,omitempty"`
+	// AnalyzedCondition, AnalyzedReason and AnalyzedMessage are the status,
+	// reason and message of the Analyzed condition.
+	AnalyzedCondition string `json:"analyzedCondition,omitempty"`
+	AnalyzedReason    string `json:"analyzedReason,omitempty"`
+	AnalyzedMessage   string `json:"analyzedMessage,omitempty"`
+	// NextAnalysisTime is when the next analysis is scheduled (RFC 3339).
+	NextAnalysisTime string `json:"nextAnalysisTime,omitempty"`
+	// ConsecutiveFailures counts the failed analyses since the last successful one.
+	ConsecutiveFailures int32 `json:"consecutiveFailures"`
 }
 
 // AtelierSummary is a summary of an Atelier resource.
@@ -186,12 +195,19 @@ func (h *Handler) ListTailorings(w http.ResponseWriter, r *http.Request) {
 			summary.ContainerCount = len(t.Status.LastAnalysis.Containers)
 		}
 
-		// Get ready condition
 		for _, c := range t.Status.Conditions {
-			if c.Type == "Ready" {
+			switch c.Type {
+			case "Ready":
 				summary.ReadyCondition = string(c.Status)
-				break
+			case "Analyzed":
+				summary.AnalyzedCondition = string(c.Status)
+				summary.AnalyzedReason = c.Reason
+				summary.AnalyzedMessage = c.Message
 			}
+		}
+		summary.ConsecutiveFailures = t.Status.ConsecutiveFailures
+		if t.Status.NextAnalysisTime != nil {
+			summary.NextAnalysisTime = t.Status.NextAnalysisTime.UTC().Format(time.RFC3339)
 		}
 
 		// Add PR status fields
