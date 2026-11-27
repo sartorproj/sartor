@@ -1752,6 +1752,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Recommendations
 	mux.HandleFunc("/api/v1/recommendations/", h.GetRecommendations)
 
+	// Analytics
+	mux.HandleFunc("/api/v1/analytics/savings", h.GetSavings)
+	mux.HandleFunc("/api/v1/analytics/top-gains", h.GetTopGains)
+
 	// FitProfiles
 	mux.HandleFunc("/api/v1/fitprofiles", h.ListFitProfiles)
 	mux.HandleFunc("/api/v1/fitprofiles/", h.GetFitProfile)
