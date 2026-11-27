@@ -41,7 +41,7 @@ The model forecasts `horizon / interval` steps ahead. The recommendation uses th
 - **requests**: upper bound of the `confidence` (default 95%) prediction interval
 - **limits**: upper bound of the `limitsConfidence` (default 99%) prediction interval
 
-These two values take the place of P95 and P99 in the percentile calculation. Everything after that is identical to the percentile strategy: `requestsBufferPercent` / `limitsBufferPercent` are added (default 20% / 30%), each change is limited to `maxChangePercent` of the current value (default 50%), and safety rails and ResourceQuota limits are applied. CPU is rounded up to whole millicores and memory to whole bytes, so recommendations are always valid, non-negative Kubernetes quantities.
+These two values take the place of P95 and P99 in the percentile calculation. Everything after that is identical to the percentile strategy: `requestsBufferPercent` / `limitsBufferPercent` are added (default 20% / 30%), each change is limited to `maxChangePercent` of the current value (default 50%), and safety rails and ResourceQuota limits are applied. A limit that ends up below its request is raised to the request. CPU is rounded up to whole millicores and memory to whole bytes, so recommendations are always valid, non-negative Kubernetes quantities.
 
 ### 5. Fallback
 

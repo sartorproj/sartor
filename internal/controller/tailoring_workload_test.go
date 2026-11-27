@@ -183,3 +183,29 @@ func TestApplyOOMFloor(t *testing.T) {
 	assert.Equal(t, "10Mi", recs[1].Requests.Memory.String(), "containers without OOM kills are unaffected")
 	assert.Equal(t, "512Mi", current["app"].Requests.Memory.String(), "current values are not aliased")
 }
+
+func TestApplyOOMFloor_LimitsCoverRequests(t *testing.T) {
+	recs := []strategy.Recommendation{
+		{ContainerName: "app", Requests: strategy.ResourceValues{Memory: q("100Mi")}, Limits: strategy.ResourceValues{Memory: q("300Mi")}},
+		{ContainerName: "no-limit", Requests: strategy.ResourceValues{Memory: q("100Mi")}},
+		{ContainerName: "kept", Requests: strategy.ResourceValues{Memory: q("100Mi")}, Limits: strategy.ResourceValues{Memory: q("1Gi")}},
+	}
+	current := map[string]autoscalingv1alpha1.ResourceRequirements{
+		"app":      {Requests: &autoscalingv1alpha1.ResourceValues{Memory: q("512Mi")}},
+		"no-limit": {Requests: &autoscalingv1alpha1.ResourceValues{Memory: q("512Mi")}},
+		"kept":     {Requests: &autoscalingv1alpha1.ResourceValues{Memory: q("512Mi")}},
+	}
+	applyOOMFloor(recs, current, []string{"app", "no-limit", "kept"})
+
+	assert.Equal(t, "512Mi", recs[0].Requests.Memory.String(), "raised to the current request")
+	assert.Equal(t, "512Mi", recs[0].Limits.Memory.String(), "a limit below the floored request is raised to it")
+	assert.Equal(t, true, recs[0].Metadata[strategy.MetadataMemoryLimitRaisedToRequest])
+	assert.NotSame(t, recs[0].Requests.Memory, recs[0].Limits.Memory, "the raised limit does not alias the request")
+
+	assert.Equal(t, "512Mi", recs[1].Requests.Memory.String())
+	assert.Nil(t, recs[1].Limits.Memory, "a missing limit is not invented")
+	assert.NotContains(t, recs[1].Metadata, strategy.MetadataMemoryLimitRaisedToRequest)
+
+	assert.Equal(t, "1Gi", recs[2].Limits.Memory.String(), "a limit above the floored request is kept")
+	assert.NotContains(t, recs[2].Metadata, strategy.MetadataMemoryLimitRaisedToRequest)
+}

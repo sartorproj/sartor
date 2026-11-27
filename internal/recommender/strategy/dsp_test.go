@@ -63,7 +63,7 @@ func TestDSPStrategy_Calculate(t *testing.T) {
 			},
 		},
 		{
-			name:    "safety rails cap the result",
+			name:    "safety rails cap the result and limits are raised to requests",
 			metrics: sampleMetrics(),
 			config: StrategyConfig{SafetyRails: SafetyRailsConfig{
 				MinCPU:    qty("2"),
@@ -73,12 +73,13 @@ func TestDSPStrategy_Calculate(t *testing.T) {
 			}},
 			check: func(t *testing.T, rec Recommendation) {
 				assertQty(t, "requests.cpu", rec.Requests.CPU, "2")
-				assertQty(t, "limits.cpu", rec.Limits.CPU, "1m")
+				assertQty(t, "limits.cpu", rec.Limits.CPU, "2")
 				assertQty(t, "requests.memory", rec.Requests.Memory, "4Gi")
-				assertQty(t, "limits.memory", rec.Limits.Memory, "1Ki")
+				assertQty(t, "limits.memory", rec.Limits.Memory, "4Gi")
 				if !rec.Capped || rec.CappedReason != "capped at maximum memory safety rail" {
 					t.Errorf("capped = %v %q", rec.Capped, rec.CappedReason)
 				}
+				assertLimitsCoverRequests(t, rec, true, true)
 			},
 		},
 		{
