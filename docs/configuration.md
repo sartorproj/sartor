@@ -127,7 +127,8 @@ writeBack:
 
 - `targetFound`: Whether target workload exists
 - `vpaDetected`: Whether VPA is managing the workload
-- `autoscalers`: HPAs, VPAs and KEDA ScaledObjects that target the workload
+- `autoscalers`: HPAs, VPAs and KEDA ScaledObjects that target the workload, with their replica bounds, Utilization targets and other metrics
+- `scaling`: How the recommendation was combined with the autoscalers: expected replica range, requests sized for HPA Utilization targets, spiky usage with recommended VPA bounds, conflicts and a short reason (see the [API reference](api-reference.md#scaling-summary))
 - `oomKilledContainers`: Containers whose last termination was an OOM kill (metrics-only mode)
 - `consecutiveFailures`: Failed analyses in a row; drives the retry backoff
 - `nextAnalysisTime`: When the next analysis is scheduled
@@ -135,7 +136,7 @@ writeBack:
   - `lastAnalysis.replicas`: Desired replica count of the target at analysis time, from kube-state-metrics; unset when not reported (see the [API reference](api-reference.md#tailoring-status-fields))
 - `recommendedResources`: Current recommendations
 - `lastCutRef`: Reference to most recent Cut
-- `conditions`: Kubernetes conditions, including `FitProfileResolved` (`False` with reason `FitProfileFallback` when the FitProfile is missing, its parameters are invalid or its strategy is unknown)
+- `conditions`: Kubernetes conditions, including `FitProfileResolved` (`False` with reason `FitProfileFallback` when the FitProfile is missing, its parameters are invalid or its strategy is unknown) and `AutoscalerConflict` (`True` when two autoscalers act on the same resource)
 
 ### CutStatus
 
