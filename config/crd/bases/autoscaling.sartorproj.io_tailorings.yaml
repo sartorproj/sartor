@@ -432,6 +432,14 @@ spec:
                       - recommended
                       type: object
                     type: array
+                  replicas:
+                    description: |-
+                      Replicas is the target workload's desired replica count at analysis
+                      time, read from kube-state-metrics (for a DaemonSet, the desired number
+                      of scheduled pods). Unset when the metrics backend did not report it.
+                    format: int32
+                    minimum: 0
+                    type: integer
                   savingsEstimate:
                     description: SavingsEstimate is the estimated monthly cost savings
                       (if OpenCost is enabled).

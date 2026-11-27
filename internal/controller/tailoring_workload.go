@@ -89,6 +89,9 @@ type workloadView struct {
 	current     map[string]autoscalingv1alpha1.ResourceRequirements
 	quota       *recommender.ResourceQuota
 	autoscalers []autoscalingv1alpha1.DetectedAutoscaler
+	// replicas is the desired replica count from kube-state-metrics, nil
+	// when it is not reported.
+	replicas *int32
 	// disagreeing and oomKilled are only known in metrics-only mode.
 	disagreeing []string
 	oomKilled   []string
@@ -135,6 +138,12 @@ func (r *TailoringReconciler) readWorkload(
 		logger.Error(err, "Failed to get ResourceQuota")
 	}
 	view.autoscalers = r.detectAutoscalers(ctx, ns, t.Spec.Target, logger)
+	// The replica count only feeds reporting, so a failed query leaves it unset.
+	if promClient != nil {
+		if view.replicas, err = promClient.GetReplicas(ctx, ns, targetWorkload(t)); err != nil {
+			logger.Error(err, "Failed to get replica count")
+		}
+	}
 	return view, nil
 }
 
@@ -152,6 +161,7 @@ func readWorkloadFromMetrics(ctx context.Context, promClient *prometheus.Client,
 
 	view := &workloadView{
 		current:     map[string]autoscalingv1alpha1.ResourceRequirements{},
+		replicas:    st.Replicas,
 		disagreeing: st.Disagreeing,
 		oomKilled:   st.OOMKilled,
 	}

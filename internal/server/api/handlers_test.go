@@ -154,6 +154,81 @@ func TestHandler_ListTailorings(t *testing.T) {
 	}
 }
 
+func TestHandler_ListTailorings_AnalysisHealth(t *testing.T) {
+	next := metav1.NewTime(time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("UTC+2", 2*3600)))
+	tests := []struct {
+		name   string
+		status autoscalingv1alpha1.TailoringStatus
+		want   map[string]interface{}
+		absent []string
+	}{
+		{
+			name: "failing analysis",
+			status: autoscalingv1alpha1.TailoringStatus{
+				Conditions: []metav1.Condition{
+					{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Paused"},
+					{Type: "Analyzed", Status: metav1.ConditionFalse, Reason: "MetricsQueryError", Message: "query timed out"},
+				},
+				NextAnalysisTime:    &next,
+				ConsecutiveFailures: 2,
+			},
+			want: map[string]interface{}{
+				"readyCondition":      "True",
+				"analyzedCondition":   "False",
+				"analyzedReason":      "MetricsQueryError",
+				"analyzedMessage":     "query timed out",
+				"nextAnalysisTime":    "2026-01-02T01:04:05Z",
+				"consecutiveFailures": 2.0,
+			},
+		},
+		{
+			name: "analysis with a FitProfile fallback",
+			status: autoscalingv1alpha1.TailoringStatus{
+				Conditions: []metav1.Condition{{
+					Type: "Analyzed", Status: metav1.ConditionTrue, Reason: "FitProfileFallback",
+					Message: "Resource analysis completed with a fallback: FitProfile example-namespace/my-profile not found",
+				}},
+			},
+			want: map[string]interface{}{
+				"analyzedCondition":   "True",
+				"analyzedReason":      "FitProfileFallback",
+				"analyzedMessage":     "Resource analysis completed with a fallback: FitProfile example-namespace/my-profile not found",
+				"consecutiveFailures": 0.0,
+			},
+			absent: []string{"nextAnalysisTime"},
+		},
+		{
+			name:   "never analyzed",
+			want:   map[string]interface{}{"consecutiveFailures": 0.0},
+			absent: []string{"analyzedCondition", "analyzedReason", "analyzedMessage", "nextAnalysisTime"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tl := &autoscalingv1alpha1.Tailoring{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-app", Namespace: "example-namespace"},
+				Spec:       autoscalingv1alpha1.TailoringSpec{Target: autoscalingv1alpha1.TargetRef{Kind: "Deployment", Name: "my-app"}},
+				Status:     tt.status,
+			}
+			rec := httptest.NewRecorder()
+			NewHandler(newFakeClient(tl)).ListTailorings(rec, httptest.NewRequest(http.MethodGet, "/api/v1/tailorings", nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+
+			var resp struct {
+				Data []map[string]interface{} `json:"data"`
+			}
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+			require.Len(t, resp.Data, 1)
+			for k, v := range tt.want {
+				assert.Equal(t, v, resp.Data[0][k], k)
+			}
+			for _, k := range tt.absent {
+				assert.NotContains(t, resp.Data[0], k)
+			}
+		})
+	}
+}
+
 func TestHandler_GetTailoring(t *testing.T) {
 	tailoring := &autoscalingv1alpha1.Tailoring{
 		ObjectMeta: metav1.ObjectMeta{

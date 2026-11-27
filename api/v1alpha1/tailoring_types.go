@@ -162,6 +162,13 @@ type AnalysisResult struct {
 	// Containers contains per-container recommendations.
 	Containers []ContainerRecommendation `json:"containers,omitempty"`
 
+	// Replicas is the target workload's desired replica count at analysis
+	// time, read from kube-state-metrics (for a DaemonSet, the desired number
+	// of scheduled pods). Unset when the metrics backend did not report it.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Replicas *int32 `json:"replicas,omitempty"`
+
 	// SavingsEstimate is the estimated monthly cost savings (if OpenCost is enabled).
 	// +optional
 	SavingsEstimate string `json:"savingsEstimate,omitempty"`

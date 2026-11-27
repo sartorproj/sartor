@@ -17,10 +17,12 @@ The Sartor server (`cmd/server`) serves a JSON REST API for the UI and other cli
 
 | Path | Description |
 |------|-------------|
-| `GET /api/v1/tailorings`, `GET /api/v1/tailorings/{namespace}/{name}` | Tailorings (optional `namespace` filter on the list) |
+| `GET /api/v1/tailorings`, `GET /api/v1/tailorings/{namespace}/{name}` | Tailorings (optional `namespace` filter on the list); see [Tailoring list](#tailoring-list) |
 | `GET /api/v1/atelier` | Atelier summary |
 | `GET /api/v1/dashboard/stats` | Dashboard statistics |
 | `GET /api/v1/recommendations/{namespace}/{tailoring}` | Last analysis of a Tailoring |
+| `GET /api/v1/analytics/savings` | [Request savings across all Tailorings](#savings), with optional cost figures |
+| `GET /api/v1/analytics/top-gains` | [Containers with the largest reclaimable requests](#top-gains) |
 | `GET /api/v1/fitprofiles`, `GET /api/v1/fitprofiles/{namespace}/{name}` | FitProfiles |
 | `GET /api/v1/strategies`, `GET /api/v1/strategies/{name}` | Recommendation strategies and their parameter schemas |
 | `GET /api/v1/metrics/{namespace}/{tailoring}` | P95/P99 usage of a Tailoring's containers |
@@ -28,6 +30,151 @@ The Sartor server (`cmd/server`) serves a JSON REST API for the UI and other cli
 | `GET /api/v1/prometheus/forecast` | [Usage forecast of a container](#container-usage-forecast) |
 | `/api/v1/argocd/...` | ArgoCD applications, sync, refresh and detection (when enabled) |
 | `/api/v1/opencost/...` | OpenCost allocations, summaries and analytics (when enabled) |
+
+## Tailoring List
+
+Each entry of `GET /api/v1/tailorings` carries, besides the target, FitProfile, PR and last analysis fields, the health of the analysis:
+
+| Field | Description |
+|-------|-------------|
+| `readyCondition` | Status of the `Ready` condition (`True`, `False`, or empty) |
+| `analyzedCondition` | Status of the `Analyzed` condition; absent before the first analysis attempt |
+| `analyzedReason` | Reason of the `Analyzed` condition, for example `AnalysisComplete`, `FitProfileFallback`, `MetricsQueryError` or `NoMetrics` |
+| `analyzedMessage` | Message of the `Analyzed` condition |
+| `nextAnalysisTime` | When the next analysis is scheduled (RFC 3339, UTC); absent when none is scheduled |
+| `consecutiveFailures` | Failed analyses since the last successful one (`0` when healthy); retries back off exponentially |
+
+## Tailoring Status Fields
+
+These Tailoring status fields are returned by `GET /api/v1/tailorings/{namespace}/{name}` and used by the analytics endpoints:
+
+| Field | Description |
+|-------|-------------|
+| `status.lastAnalysis.replicas` | Desired replica count of the target at analysis time, read from kube-state-metrics in the same metrics backend as the usage (`kube_deployment_spec_replicas`, `kube_statefulset_replicas`, or `kube_daemonset_status_desired_number_scheduled` for a DaemonSet), scoped by the Atelier's `prometheus.clusterLabel` and `spec.target.cluster`. Unset (not `0`) when the series is missing or the query fails; `0` means the workload is scaled to zero. With an HPA it is the replica count at that moment. |
+| `FitProfileResolved` condition | `True` (reason `FitProfileResolved`) when the referenced FitProfile was used as configured. `False` with reason `FitProfileFallback` when the analysis fell back: the FitProfile does not exist or cannot be read (the percentile strategy with default parameters is used), its `parameters` are not a JSON object (default parameters are used), or its `strategy` is unknown (the percentile strategy is used). The message says which. |
+| `Analyzed` condition | After a successful analysis: reason `AnalysisComplete`, or `FitProfileFallback` with the fallback in the message when the FitProfile could not be used as configured. |
+
+## Savings
+
+`GET /api/v1/analytics/savings` estimates the resources the latest recommendations would free (or need) across all Tailorings, from Tailoring status only. It needs neither OpenCost nor a metrics query.
+
+For every container of a Tailoring's last analysis that has both a current and a recommended request, the saving is `(current request - recommended request) x replicas`, per resource. Positive savings add to `reclaimable`, negative ones to `increase`, so an increase in one container never hides a decrease in another. Quantities in any unit (`250m`, `1.5`, `512Mi`, `1Gi`, `1048576Ki`, plain bytes) are converted to **cores** and **GiB** (2^30 bytes).
+
+A Tailoring is included when it has a last analysis, a replica count (`status.lastAnalysis.replicas`) and at least one container with both a current and a recommended CPU or memory request. Otherwise it is counted as skipped, with the first reason that applies: `skippedNoAnalysis`, `skippedNoReplicas`, `skippedNoCurrentRequest`. In an included Tailoring, a resource without both requests (for example no CPU request set) is left out of that container's saving. Negative or implausibly large quantities (above 2^20 cores or 2^50 bytes) are treated as missing.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `cpuPricePerCoreHour` | no | Price of one core for one hour. A number from 0 to 1e9. |
+| `memPricePerGiBHour` | no | Price of one GiB of memory for one hour. A number from 0 to 1e9. |
+
+There are no default prices: without a price parameter the response has no `cost` and no `pricing`. With only one of them, the cost covers only that resource. Prices are in whatever currency they are given in; multiply the hourly figures by 730 for an approximate month.
+
+### Response
+
+```json
+{
+  "success": true,
+  "data": {
+    "totals": {
+      "cpu": {"reclaimableCores": 12.5, "increaseCores": 1.25, "netCores": 11.25},
+      "memory": {"reclaimableGiB": 40, "increaseGiB": 2.5, "netGiB": 37.5},
+      "cost": {"reclaimablePerHour": 0.7, "increasePerHour": 0.0625, "netPerHour": 0.6375}
+    },
+    "byCluster": [
+      {"cluster": "example-cluster", "tailorings": 8, "cpu": {}, "memory": {}, "cost": {}}
+    ],
+    "byNamespace": [
+      {"cluster": "example-cluster", "namespace": "example-namespace", "tailorings": 3, "cpu": {}, "memory": {}, "cost": {}}
+    ],
+    "tailorings": {"total": 10, "included": 8, "skippedNoAnalysis": 1, "skippedNoReplicas": 1, "skippedNoCurrentRequest": 0},
+    "pricing": {"cpuPricePerCoreHour": 0.04, "memPricePerGiBHour": 0.005}
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `totals` | Sum over all included Tailorings |
+| `byCluster` | One entry per `spec.target.cluster`, sorted by cluster. Tailorings without a cluster are grouped under `""`. |
+| `byNamespace` | One entry per cluster and **workload** namespace (`spec.target.namespace`, or the Tailoring's namespace), sorted by cluster then namespace |
+| `tailorings` (in groups) | Number of included Tailorings in the group |
+| `cpu`, `memory` | `reclaimable*` sums the decreases, `increase*` the increases (both non-negative), `net*` is reclaimable minus increase |
+| `cost` | Only with a price: the same three figures priced per hour |
+| `tailorings` (top level) | How many Tailorings exist, were included and were skipped, by reason |
+| `pricing` | The prices used; absent without a price parameter |
+
+With no Tailorings the response is `200` with zero totals and empty `byCluster` and `byNamespace` lists.
+
+### Status Codes
+
+| Status | When |
+|--------|------|
+| `200` | Report, including an empty one |
+| `400` | A price parameter is empty, not a number, negative, `NaN`, or above 1e9 (which also rejects infinity) |
+| `405` | Method other than `GET` |
+| `500` | Tailorings cannot be listed |
+
+### Example
+
+```bash
+curl -H "X-API-Key: $API_KEY" \
+  "http://localhost:8080/api/v1/analytics/savings?cpuPricePerCoreHour=0.04&memPricePerGiBHour=0.005"
+```
+
+## Top Gains
+
+`GET /api/v1/analytics/top-gains` lists the containers with the largest reclaimable requests, computed exactly like the [savings](#savings) (`(current - recommended request) x replicas`, from included Tailorings only), in two rankings: by reclaimable CPU and by reclaimable memory. Containers without a positive saving for a resource are not in that resource's list. Ties are ordered by cluster, Tailoring namespace, Tailoring name and container.
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `limit` | no | `20` | Maximum entries per list; an integer from 1 to 200 |
+
+### Response
+
+```json
+{
+  "success": true,
+  "data": {
+    "limit": 20,
+    "byCPU": [
+      {
+        "cluster": "example-cluster",
+        "namespace": "example-namespace",
+        "tailoring": "my-app",
+        "workloadKind": "Deployment",
+        "workloadName": "my-app",
+        "workloadNamespace": "example-namespace",
+        "container": "app",
+        "replicas": 3,
+        "currentRequests": {"cpu": "1", "memory": "1Gi"},
+        "recommendedRequests": {"cpu": "500m", "memory": "512Mi"},
+        "cpuSavingCores": 1.5,
+        "memorySavingGiB": 1.5
+      }
+    ],
+    "byMemory": [],
+    "tailorings": {"total": 10, "included": 8, "skippedNoAnalysis": 1, "skippedNoReplicas": 1, "skippedNoCurrentRequest": 0}
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `namespace`, `tailoring` | The Tailoring (use with `GET /api/v1/tailorings/{namespace}/{name}`) |
+| `workloadKind`, `workloadName`, `workloadNamespace`, `cluster` | The target workload |
+| `currentRequests`, `recommendedRequests` | Per-pod requests as Kubernetes quantities; a resource without a request is absent |
+| `replicas` | `status.lastAnalysis.replicas` |
+| `cpuSavingCores`, `memorySavingGiB` | `(current - recommended) x replicas`: positive when reclaimable, negative when an increase is needed, absent when either request is missing |
+| `tailorings` | As for the savings endpoint |
+
+### Status Codes
+
+| Status | When |
+|--------|------|
+| `200` | Rankings, possibly empty |
+| `400` | `limit` is empty, not an integer, below 1 or above 200 |
+| `405` | Method other than `GET` |
+| `500` | Tailorings cannot be listed |
 
 ## Container Usage Time Series
 

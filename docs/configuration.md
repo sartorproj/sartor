@@ -132,9 +132,10 @@ writeBack:
 - `consecutiveFailures`: Failed analyses in a row; drives the retry backoff
 - `nextAnalysisTime`: When the next analysis is scheduled
 - `lastAnalysis`: Latest analysis results
+  - `lastAnalysis.replicas`: Desired replica count of the target at analysis time, from kube-state-metrics; unset when not reported (see the [API reference](api-reference.md#tailoring-status-fields))
 - `recommendedResources`: Current recommendations
 - `lastCutRef`: Reference to most recent Cut
-- `conditions`: Kubernetes conditions
+- `conditions`: Kubernetes conditions, including `FitProfileResolved` (`False` with reason `FitProfileFallback` when the FitProfile is missing, its parameters are invalid or its strategy is unknown)
 
 ### CutStatus
 
