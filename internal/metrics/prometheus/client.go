@@ -70,6 +70,12 @@ type ContainerMetrics struct {
 	P95Memory *resource.Quantity
 	// P99Memory is the P99 memory usage.
 	P99Memory *resource.Quantity
+	// CPUHistory is the CPU usage over time in cores. It is only filled for
+	// strategies that forecast from history (see GetContainerHistory).
+	CPUHistory []TimeSeriesPoint `json:"-"`
+	// MemoryHistory is the memory usage over time in bytes. It is only
+	// filled for strategies that forecast from history.
+	MemoryHistory []TimeSeriesPoint `json:"-"`
 }
 
 // basicAuthRoundTripper implements http.RoundTripper with basic auth.
@@ -245,15 +251,22 @@ type containerMetricQuery struct {
 	set   func(*ContainerMetrics, float64)
 }
 
+// containerUsageExprs returns the CPU (cores) and memory (bytes) usage of
+// sel's pods, reduced with max by container.
+func containerUsageExprs(sel podSelector) (cpu, mem string) {
+	cpu = sel.scope(fmt.Sprintf(`rate(container_cpu_usage_seconds_total{%s}[5m])`,
+		sel.matchers(`container!=""`, `container!="POD"`)))
+	mem = sel.scope(fmt.Sprintf(`container_memory_working_set_bytes{%s}`,
+		sel.matchers(`container!=""`, `container!="POD"`)))
+	return "max by (container) (" + cpu + ")", "max by (container) (" + mem + ")"
+}
+
 // containerMetricQueries returns the P95/P99 CPU and memory queries for sel.
 func containerMetricQueries(sel podSelector, window time.Duration) []containerMetricQuery {
 	w := formatDuration(window)
-	cpu := sel.scope(fmt.Sprintf(`rate(container_cpu_usage_seconds_total{%s}[5m])`,
-		sel.matchers(`container!=""`, `container!="POD"`)))
-	mem := sel.scope(fmt.Sprintf(`container_memory_working_set_bytes{%s}`,
-		sel.matchers(`container!=""`, `container!="POD"`)))
+	cpu, mem := containerUsageExprs(sel)
 	quantile := func(q, expr string) string {
-		return fmt.Sprintf(`quantile_over_time(%s, (max by (container) (%s))[%s:5m])`, q, expr, w)
+		return fmt.Sprintf(`quantile_over_time(%s, (%s)[%s:5m])`, q, expr, w)
 	}
 	setCPU := func(set func(*ContainerMetrics, *resource.Quantity)) func(*ContainerMetrics, float64) {
 		return func(m *ContainerMetrics, v float64) {
@@ -416,6 +429,72 @@ func (c *Client) GetTimeSeriesMetrics(ctx context.Context, namespace string, wor
 	}
 
 	return points, nil
+}
+
+// MaxHistoryPoints bounds the samples per series of GetContainerHistory,
+// below the 11,000 points per series a Prometheus range query allows.
+const MaxHistoryPoints = 10000
+
+// ContainerHistory holds a container's usage over time.
+type ContainerHistory struct {
+	// CPU is the CPU usage in cores.
+	CPU []TimeSeriesPoint
+	// Memory is the memory working set in bytes.
+	Memory []TimeSeriesPoint
+}
+
+// GetContainerHistory queries the per-container CPU and memory usage of the
+// workload over window, one sample per step. It uses the same expressions as
+// GetContainerMetrics, so the history matches the percentiles.
+func (c *Client) GetContainerHistory(ctx context.Context, namespace string, workload Workload, window, step time.Duration) (map[string]ContainerHistory, error) {
+	if step <= 0 || window <= 0 {
+		return nil, fmt.Errorf("window and step must be positive")
+	}
+	if window/step > MaxHistoryPoints {
+		return nil, fmt.Errorf("step %s yields more than %d points over %s", step, MaxHistoryPoints, window)
+	}
+	sel, err := c.newSelector(ctx, namespace, workload)
+	if err != nil {
+		return nil, err
+	}
+
+	end := time.Now()
+	timeRange := promv1.Range{Start: end.Add(-window), End: end, Step: step}
+	cpu, mem := containerUsageExprs(sel)
+	history := make(map[string]ContainerHistory)
+	for _, q := range []struct {
+		name, query string
+		set         func(*ContainerHistory, []TimeSeriesPoint)
+	}{
+		{"CPU history", cpu, func(h *ContainerHistory, p []TimeSeriesPoint) { h.CPU = p }},
+		{"memory history", mem, func(h *ContainerHistory, p []TimeSeriesPoint) { h.Memory = p }},
+	} {
+		result, warnings, _, err := c.api.QueryRange(ctx, q.query, timeRange)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query %s: %w", q.name, err)
+		}
+		if len(warnings) > 0 {
+			fmt.Printf("Prometheus query warnings: %v\n", warnings)
+		}
+		matrix, ok := result.(model.Matrix)
+		if !ok {
+			return nil, fmt.Errorf("unexpected result type: %T", result)
+		}
+		for _, series := range matrix {
+			name := string(series.Metric["container"])
+			if name == "" {
+				continue
+			}
+			points := make([]TimeSeriesPoint, 0, len(series.Values))
+			for _, s := range series.Values {
+				points = append(points, TimeSeriesPoint{Timestamp: s.Timestamp.Unix(), Value: float64(s.Value)})
+			}
+			h := history[name]
+			q.set(&h, points)
+			history[name] = h
+		}
+	}
+	return history, nil
 }
 
 // formatDuration formats a duration for PromQL using the largest unit that
