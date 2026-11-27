@@ -258,6 +258,8 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	applyOOMFloor(recommendations, currentResources, view.oomKilled)
+	tailoring.Status.Scaling = applyScaling(ctx, tailoring, promClient, view, metrics, recommendations, safetyRails, analysisWindow, logger)
+	r.setConflictCondition(tailoring)
 	r.setScalingPointCondition(tailoring, recommendations, currentResources, assumedKeptBy(tailoring))
 
 	// Convert strategy recommendations to old format for compatibility
