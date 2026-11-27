@@ -200,10 +200,30 @@ spec:
                       description: ManagedBy names the ScaledObject that owns this
                         HPA, if known.
                       type: string
+                    maxReplicas:
+                      description: |-
+                        MaxReplicas is the HPA maxReplicas (ScaledObject maxReplicaCount).
+                        Unset when the source does not expose it.
+                      format: int32
+                      type: integer
+                    minReplicas:
+                      description: |-
+                        MinReplicas is the HPA minReplicas (ScaledObject minReplicaCount).
+                        Unset when the source does not expose it.
+                      format: int32
+                      type: integer
                     name:
                       description: Name is the autoscaler name. Empty when the source
                         does not expose it.
                       type: string
+                    otherMetrics:
+                      description: |-
+                        OtherMetrics lists what the HPA or ScaledObject also scales on besides
+                        cpu/memory Utilization targets, e.g. "External", "cpu AverageValue" or
+                        a KEDA trigger type.
+                      items:
+                        type: string
+                      type: array
                     updateMode:
                       description: UpdateMode is the VPA update mode (Off, Initial,
                         Recreate, Auto, ...).
@@ -214,6 +234,32 @@ spec:
                         on with a Utilization target, i.e. relative to the requests.
                       items:
                         type: string
+                      type: array
+                    utilizationTargets:
+                      description: UtilizationTargets are the cpu/memory Utilization
+                        targets with a value.
+                      items:
+                        description: |-
+                          UtilizationTarget is a cpu or memory Utilization target of an HPA or of a
+                          KEDA cpu/memory trigger.
+                        properties:
+                          averageUtilization:
+                            description: AverageUtilization is the target in percent
+                              of the requests.
+                            format: int32
+                            type: integer
+                          container:
+                            description: |-
+                              Container is set for a ContainerResource metric (or a KEDA trigger
+                              with containerName); empty means the sum over the pod's containers.
+                            type: string
+                          resource:
+                            description: Resource is cpu or memory.
+                            type: string
+                        required:
+                        - averageUtilization
+                        - resource
+                        type: object
                       type: array
                   required:
                   - kind
@@ -495,6 +541,333 @@ spec:
               prUrl:
                 description: PRUrl is the URL of the Pull Request.
                 type: string
+              scaling:
+                description: |-
+                  Scaling explains how the last recommendation accounts for the
+                  autoscalers (HPA, KEDA, VPA) and the usage pattern of the workload.
+                properties:
+                  alignedResources:
+                    description: |-
+                      AlignedResources lists the resources (cpu, memory) whose requests were
+                      sized for an HPA Utilization target. Raw write-back does not rescale
+                      the matching ScaledObject Utilization triggers.
+                    items:
+                      type: string
+                    type: array
+                  autoscalers:
+                    description: Autoscalers names the autoscalers the recommendation
+                      accounted for, as Kind/name.
+                    items:
+                      type: string
+                    type: array
+                  conflicts:
+                    description: Conflicts lists autoscalers that act on the same
+                      resource.
+                    items:
+                      description: |-
+                        ScalingConflict is a combination of autoscalers that act on the same
+                        resource. Sartor flags it and does not try to resolve it.
+                      properties:
+                        autoscalers:
+                          description: Autoscalers names the conflicting autoscalers
+                            as Kind/name.
+                          items:
+                            type: string
+                          type: array
+                        message:
+                          description: Message explains the conflict and what Sartor
+                            did.
+                          type: string
+                        resource:
+                          description: Resource is cpu or memory; empty when the conflict
+                            is not about one resource.
+                          type: string
+                      required:
+                      - autoscalers
+                      - message
+                      type: object
+                    type: array
+                  containers:
+                    description: Containers explains the sizing of every container.
+                    items:
+                      description: ContainerScaling explains how one container's requests
+                        were sized.
+                      properties:
+                        cpu:
+                          description: ResourceScaling explains how one resource of
+                            one container was sized.
+                          properties:
+                            peakToBaseline:
+                              description: |-
+                                PeakToBaseline is the ratio of the P99 to the P50 usage, as a decimal
+                                string such as "3.20". Unset when the baseline is zero or unknown.
+                              type: string
+                            perPodRequest:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: PerPodRequest is the request sizing from
+                                per-pod usage alone gives.
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            perPodUsage:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: PerPodUsage is the typical per-pod usage
+                                the request was sized from.
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            reason:
+                              description: Reason explains the sizing in one sentence.
+                              type: string
+                            request:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: Request is the recommended request (status.lastAnalysis).
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            sizing:
+                              description: Sizing is how the recommended request was
+                                chosen.
+                              enum:
+                              - PerPod
+                              - HPAUtilization
+                              - VPABaseline
+                              type: string
+                            spiky:
+                              description: Spiky is true when the usage peaks far
+                                above its baseline.
+                              type: boolean
+                            targetUtilization:
+                              description: |-
+                                TargetUtilization is the HPA Utilization target, in percent, the
+                                request was sized for.
+                              format: int32
+                              type: integer
+                          required:
+                          - sizing
+                          type: object
+                        memory:
+                          description: ResourceScaling explains how one resource of
+                            one container was sized.
+                          properties:
+                            peakToBaseline:
+                              description: |-
+                                PeakToBaseline is the ratio of the P99 to the P50 usage, as a decimal
+                                string such as "3.20". Unset when the baseline is zero or unknown.
+                              type: string
+                            perPodRequest:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: PerPodRequest is the request sizing from
+                                per-pod usage alone gives.
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            perPodUsage:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: PerPodUsage is the typical per-pod usage
+                                the request was sized from.
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            reason:
+                              description: Reason explains the sizing in one sentence.
+                              type: string
+                            request:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              description: Request is the recommended request (status.lastAnalysis).
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            sizing:
+                              description: Sizing is how the recommended request was
+                                chosen.
+                              enum:
+                              - PerPod
+                              - HPAUtilization
+                              - VPABaseline
+                              type: string
+                            spiky:
+                              description: Spiky is true when the usage peaks far
+                                above its baseline.
+                              type: boolean
+                            targetUtilization:
+                              description: |-
+                                TargetUtilization is the HPA Utilization target, in percent, the
+                                request was sized for.
+                              format: int32
+                              type: integer
+                          required:
+                          - sizing
+                          type: object
+                        name:
+                          description: Name is the container name.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  reason:
+                    description: Reason summarizes the recommendation in a short sentence.
+                    type: string
+                  replicas:
+                    description: Replicas is the replica range the recommendation
+                      assumed.
+                    properties:
+                      max:
+                        description: Max is the highest replica count observed (within
+                          the HPA bounds).
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      min:
+                        description: Min is the lowest replica count observed (within
+                          the HPA bounds).
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      source:
+                        description: Source says where the range comes from.
+                        enum:
+                        - History
+                        - Current
+                        - Fixed
+                        type: string
+                      typical:
+                        description: Typical is the median replica count, the count
+                          requests are sized for.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                    - max
+                    - min
+                    - source
+                    - typical
+                    type: object
+                  vpa:
+                    description: VPA holds recommended VPA bounds for spiky workloads.
+                    items:
+                      description: VPARecommendation holds recommended bounds for
+                        a VerticalPodAutoscaler.
+                      properties:
+                        containers:
+                          description: Containers holds the recommended bounds per
+                            container.
+                          items:
+                            description: |-
+                              VPAContainerBounds are recommended VPA minAllowed/maxAllowed values of one
+                              container, next to the values the VPA has now.
+                            properties:
+                              currentMaxAllowed:
+                                description: CurrentMaxAllowed is the VPA's maxAllowed
+                                  for the container, if known.
+                                properties:
+                                  cpu:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    description: CPU is the CPU resource value.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                  memory:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    description: Memory is the memory resource value.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                type: object
+                              currentMinAllowed:
+                                description: CurrentMinAllowed is the VPA's minAllowed
+                                  for the container, if known.
+                                properties:
+                                  cpu:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    description: CPU is the CPU resource value.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                  memory:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    description: Memory is the memory resource value.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                type: object
+                              maxAllowed:
+                                description: MaxAllowed is the recommended maxAllowed.
+                                properties:
+                                  cpu:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    description: CPU is the CPU resource value.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                  memory:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    description: Memory is the memory resource value.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                type: object
+                              minAllowed:
+                                description: MinAllowed is the recommended minAllowed.
+                                properties:
+                                  cpu:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    description: CPU is the CPU resource value.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                  memory:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    description: Memory is the memory resource value.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                type: object
+                              name:
+                                description: Name is the container name.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                        name:
+                          description: Name is the VPA name.
+                          type: string
+                        reason:
+                          description: Reason explains the recommendation in one sentence.
+                          type: string
+                        updateMode:
+                          description: UpdateMode is the VPA update mode.
+                          type: string
+                        writeBack:
+                          description: |-
+                            WriteBack is true when Git write-back applies the bounds (raw
+                            write-back, updateMode other than Off). With Off they are only
+                            recommended.
+                          type: boolean
+                      required:
+                      - name
+                      - writeBack
+                      type: object
+                    type: array
+                required:
+                - reason
+                type: object
               targetFound:
                 description: TargetFound indicates if the target workload exists.
                 type: boolean
