@@ -27,6 +27,7 @@ spec:
 - Adds `requestsBufferPercent` and `limitsBufferPercent` on top (see the eco, balanced and critical samples in `config/samples`)
 - Limits each change to `maxChangePercent` of the current value
 - Respects safety rails and resource quotas
+- Raises a limit that ends up below its request to the request (recorded as `cpu_limit_raised_to_request` / `memory_limit_raised_to_request` in the recommendation metadata)
 
 **Best for:**
 - Most production workloads

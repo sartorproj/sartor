@@ -132,6 +132,9 @@ func (s *MyStrategy) Calculate(
             s.applyQuotaLimits(&rec, config.ResourceQuota)
         }
 
+        // Never recommend a limit below its request
+        EnsureLimitsCoverRequests(&rec)
+
         recommendations = append(recommendations, rec)
     }
 
@@ -314,11 +317,12 @@ The `StrategyConfig` passed to `Calculate()` contains:
 
 1. **Always apply safety rails**: Use the provided safety rails to prevent dangerous recommendations
 2. **Respect quotas**: Check and apply ResourceQuota limits
-3. **Provide metadata**: Add useful information to `Recommendation.Metadata` for debugging
-4. **Set confidence**: Provide a realistic confidence score (0-1)
-5. **Handle missing data**: Gracefully handle cases where metrics might be missing
-6. **Validate parameters**: Thoroughly validate FitProfile parameters
-7. **Document parameters**: Provide clear schema and examples in `GetDefaultFitProfileSpec()`
+3. **Keep limits at or above requests**: Call `EnsureLimitsCoverRequests` after all post-processing; buffers, gradual change, safety rails and quotas applied per value can otherwise leave a limit below its request
+4. **Provide metadata**: Add useful information to `Recommendation.Metadata` for debugging
+5. **Set confidence**: Provide a realistic confidence score (0-1)
+6. **Handle missing data**: Gracefully handle cases where metrics might be missing
+7. **Validate parameters**: Thoroughly validate FitProfile parameters
+8. **Document parameters**: Provide clear schema and examples in `GetDefaultFitProfileSpec()`
 
 ## Example: Complete Strategy
 
