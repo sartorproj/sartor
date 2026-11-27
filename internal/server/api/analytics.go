@@ -41,6 +41,9 @@ const (
 	// per-container products exact and the sums finite.
 	maxRequestCores = 1 << 20
 	maxRequestBytes = 1 << 50
+	// maxPrice bounds the price parameters so that cost figures stay finite;
+	// JSON cannot encode infinite values.
+	maxPrice = 1e9
 )
 
 // SavingsCounts tells which Tailorings an analytics result covers.
@@ -439,15 +442,15 @@ func rankGains(savings []containerSaving, value func(containerSaving) float64, l
 	return out
 }
 
-// parsePrice reads an optional non-negative price parameter.
+// parsePrice reads an optional price parameter from 0 to maxPrice.
 func parsePrice(query url.Values, name string) (*float64, error) {
 	if !query.Has(name) {
 		return nil, nil
 	}
 	raw := query.Get(name)
 	v, err := strconv.ParseFloat(raw, 64)
-	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
-		return nil, fmt.Errorf("invalid %s %q: must be a non-negative number", name, raw)
+	if err != nil || math.IsNaN(v) || v < 0 || v > maxPrice {
+		return nil, fmt.Errorf("invalid %s %q: must be a non-negative number up to %g", name, raw, float64(maxPrice))
 	}
 	return &v, nil
 }

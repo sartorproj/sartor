@@ -64,8 +64,8 @@ A Tailoring is included when it has a last analysis, a replica count (`status.la
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `cpuPricePerCoreHour` | no | Price of one core for one hour. Non-negative number. |
-| `memPricePerGiBHour` | no | Price of one GiB of memory for one hour. Non-negative number. |
+| `cpuPricePerCoreHour` | no | Price of one core for one hour. A number from 0 to 1e9. |
+| `memPricePerGiBHour` | no | Price of one GiB of memory for one hour. A number from 0 to 1e9. |
 
 There are no default prices: without a price parameter the response has no `cost` and no `pricing`. With only one of them, the cost covers only that resource. Prices are in whatever currency they are given in; multiply the hourly figures by 730 for an approximate month.
 
@@ -110,7 +110,7 @@ With no Tailorings the response is `200` with zero totals and empty `byCluster` 
 | Status | When |
 |--------|------|
 | `200` | Report, including an empty one |
-| `400` | A price parameter is empty, not a number, negative, `NaN` or infinite |
+| `400` | A price parameter is empty, not a number, negative, `NaN`, or above 1e9 (which also rejects infinity) |
 | `405` | Method other than `GET` |
 | `500` | Tailorings cannot be listed |
 

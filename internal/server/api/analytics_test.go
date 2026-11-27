@@ -20,9 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -299,6 +301,34 @@ func TestBuildSavingsReport_Pricing(t *testing.T) {
 	}
 }
 
+// TestBuildSavingsReport_ExtremeValuesStayEncodable checks that the largest
+// accepted quantities, replica count and prices still give finite figures:
+// an infinite value would make the JSON response fail after the 200 status.
+func TestBuildSavingsReport_ExtremeValuesStayEncodable(t *testing.T) {
+	price := float64(maxPrice)
+	items := make([]autoscalingv1alpha1.Tailoring, 0, 100)
+	for i := range 100 {
+		items = append(items, analyzed("example-namespace", "my-app-"+strconv.Itoa(i), "", replicas(math.MaxInt32),
+			ctr("max", "1048576", "1Pi", "0", "0"),
+			ctr("min", "0", "0", "1048576", "1Pi"),
+			ctr("absurd", "1e30", "999999Ei", "1m", "1Ki"),
+		))
+	}
+
+	r := buildSavingsReport(items, SavingsPricing{CPUPricePerCoreHour: &price, MemPricePerGiBHour: &price})
+
+	require.NotNil(t, r.Totals.Cost)
+	for _, v := range []float64{
+		r.Totals.CPU.ReclaimableCores, r.Totals.CPU.IncreaseCores, r.Totals.Memory.ReclaimableGiB, r.Totals.Memory.IncreaseGiB,
+		r.Totals.Cost.ReclaimablePerHour, r.Totals.Cost.IncreasePerHour, r.Totals.Cost.NetPerHour,
+	} {
+		assert.False(t, math.IsInf(v, 0) || math.IsNaN(v), "value %v", v)
+	}
+	assert.InDelta(t, 0, r.Totals.CPU.NetCores, delta, "the max and min containers cancel out in the net figure")
+	_, err := json.Marshal(r)
+	require.NoError(t, err)
+}
+
 func TestBuildTopGainsReport(t *testing.T) {
 	items := []autoscalingv1alpha1.Tailoring{
 		analyzed("example-namespace", "b-app", "example-cluster", replicas(2),
@@ -431,6 +461,9 @@ func TestParsePrice(t *testing.T) {
 		{query: "p=Inf", wantErr: true},
 		{query: "p=-Inf", wantErr: true},
 		{query: "p=1e400", wantErr: true},
+		{query: "p=1e9", want: ptrFloat(1e9)},
+		{query: "p=1000000001", wantErr: true},
+		{query: "p=1e300", wantErr: true},
 		{query: "p=", wantErr: true},
 		{query: "p=1,5", wantErr: true},
 	}
@@ -478,6 +511,8 @@ func TestAnalyticsEndpoints_StatusCodes(t *testing.T) {
 		{name: "savings negative memory price", target: "/api/v1/analytics/savings?memPricePerGiBHour=-1", want: http.StatusBadRequest},
 		{name: "savings NaN price", target: "/api/v1/analytics/savings?memPricePerGiBHour=NaN", want: http.StatusBadRequest},
 		{name: "savings empty price", target: "/api/v1/analytics/savings?cpuPricePerCoreHour=", want: http.StatusBadRequest},
+		{name: "savings price too large", target: "/api/v1/analytics/savings?cpuPricePerCoreHour=1e-300&memPricePerGiBHour=1e300", want: http.StatusBadRequest},
+		{name: "savings largest prices", target: "/api/v1/analytics/savings?cpuPricePerCoreHour=1e9&memPricePerGiBHour=1e9", want: http.StatusOK},
 		{name: "savings POST", method: http.MethodPost, target: "/api/v1/analytics/savings", want: http.StatusMethodNotAllowed},
 		{name: "savings list error", target: "/api/v1/analytics/savings", client: failingListClient(), want: http.StatusInternalServerError},
 		{name: "top gains", target: "/api/v1/analytics/top-gains", want: http.StatusOK},
