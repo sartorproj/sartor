@@ -68,7 +68,7 @@ func TestHandler_GetPrometheusMetrics_Cluster(t *testing.T) {
 	queries = nil
 	rec = httptest.NewRecorder()
 	handler.GetPrometheusMetrics(rec, httptest.NewRequest(http.MethodGet, base, nil))
-	assert.NotEqual(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "a target cluster is required")
 	assert.Empty(t, queries, "no unscoped query")
 }
