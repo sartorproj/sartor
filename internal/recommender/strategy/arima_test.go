@@ -21,12 +21,14 @@ import (
 	"encoding/json"
 	"math"
 	"math/rand"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/yaml"
 
 	autoscalingv1alpha1 "github.com/sartorproj/sartor/api/v1alpha1"
 	"github.com/sartorproj/sartor/internal/metrics/prometheus"
@@ -451,6 +453,17 @@ func TestARIMAStrategy_PrepareSeries(t *testing.T) {
 	if _, _, _, err = s.prepareSeries(same, 1000); err == nil || !strings.Contains(err.Error(), "one timestamp") {
 		t.Errorf("err = %v", err)
 	}
+
+	stale := append([]prometheus.TimeSeriesPoint{{Timestamp: 0, Value: 1}}, usage(100, 1, func(int, *rand.Rand) float64 { return 1 })...)
+	if _, _, _, err = s.prepareSeries(stale, 1000); err == nil || !strings.Contains(err.Error(), "gaps") {
+		t.Errorf("a single stale sample leaves the buckets empty: %v", err)
+	}
+
+	extreme := usage(100, 1, func(int, *rand.Rand) float64 { return 1 })
+	extreme[0].Timestamp, extreme[99].Timestamp = math.MinInt64, math.MaxInt64
+	if _, _, _, err = s.prepareSeries(extreme, 1000); err == nil || !strings.Contains(err.Error(), "out of range") {
+		t.Errorf("err = %v", err)
+	}
 }
 
 func TestARIMAStrategy_SeasonalPeriods(t *testing.T) {
@@ -721,6 +734,38 @@ func TestARIMAStrategy_JSONParameters(t *testing.T) {
 	if p.order != [3]int{1, 1, 1} || p.seasonalOrder != [3]int{1, 1, 0} || p.seasonalPeriod != 24*time.Hour ||
 		p.horizon != 6*time.Hour || p.maxSamples != 800 || p.confidence != 0.95 || p.limitsConfidence != 0.99 {
 		t.Errorf("parsed %+v", p)
+	}
+}
+
+func TestARIMAStrategy_SampleFitProfile(t *testing.T) {
+	data, err := os.ReadFile("../../../config/samples/fitprofile-arima.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fp autoscalingv1alpha1.FitProfile
+	if err := yaml.UnmarshalStrict(data, &fp); err != nil {
+		t.Fatal(err)
+	}
+	if fp.Spec.Strategy != StrategyNameARIMA || fp.Spec.Parameters == nil {
+		t.Fatalf("unexpected sample spec: %+v", fp.Spec)
+	}
+	var params map[string]interface{}
+	if err := json.Unmarshal(fp.Spec.Parameters.Raw, &params); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewARIMAStrategy(0).ValidateFitProfileParameters(params); err != nil {
+		t.Errorf("sample parameters are invalid: %v", err)
+	}
+	example, err := json.Marshal(NewARIMAStrategy(0).GetDefaultFitProfileSpec().ExampleParameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exampleParams map[string]interface{}
+	if err := json.Unmarshal(example, &exampleParams); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(params, exampleParams) {
+		t.Errorf("sample parameters %v differ from the example parameters %v", params, exampleParams)
 	}
 }
 

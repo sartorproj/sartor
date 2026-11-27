@@ -93,10 +93,19 @@ const (
 	arimaWeek = 7 * arimaDay
 )
 
+// Post-processing parameters shared with the percentile strategy.
+const (
+	paramRequestsBufferPercent = "requestsBufferPercent"
+	paramLimitsBufferPercent   = "limitsBufferPercent"
+	paramMaxChangePercent      = "maxChangePercent"
+)
+
+var arimaPostProcessingKeys = []string{paramRequestsBufferPercent, paramLimitsBufferPercent, paramMaxChangePercent}
+
 var arimaParameterKeys = map[string]bool{
 	"mode": true, "order": true, "seasonalOrder": true, "seasonalPeriod": true, "seasonal": true,
 	"confidence": true, "limitsConfidence": true, "horizon": true, "maxSamples": true,
-	"requestsBufferPercent": true, "limitsBufferPercent": true, "maxChangePercent": true,
+	paramRequestsBufferPercent: true, paramLimitsBufferPercent: true, paramMaxChangePercent: true,
 }
 
 // ARIMAStrategy forecasts CPU and memory usage with (seasonal) ARIMA models
@@ -434,10 +443,13 @@ func (s *ARIMAStrategy) prepareSeries(history []prometheus.TimeSeriesPoint, maxS
 	base := max(int64(s.sampleInterval/time.Second), diffs[len(diffs)/2], 1)
 
 	first, last := points[0].Timestamp, points[len(points)-1].Timestamp
+	if last-first <= 0 {
+		return nil, 0, 0, errors.New("history timestamps are out of range")
+	}
 	factor := max((last-first)/base/int64(maxSamples)+1, 1)
 	// Prefer an interval that divides a day so seasonal periods are whole.
 	daySeconds := int64(arimaDay / time.Second)
-	for f := factor; f <= 2*factor; f++ {
+	for f := factor; f <= 2*factor && base*f <= daySeconds; f++ {
 		if daySeconds%(base*f) == 0 {
 			factor = f
 			break
@@ -536,76 +548,93 @@ func parseARIMAParameters(parameters map[string]interface{}) (arimaParams, error
 		p.mode = mode
 	}
 
+	if err := parseARIMAForecastParameters(parameters, &p); err != nil {
+		return p, err
+	}
+	if p.mode == arimaModeAuto {
+		return p, parseARIMAAutoParameters(parameters, &p)
+	}
+	return p, parseARIMAFixedParameters(parameters, &p)
+}
+
+// parseARIMAForecastParameters parses the parameters shared by both modes.
+func parseARIMAForecastParameters(parameters map[string]interface{}, p *arimaParams) error {
 	var err error
 	if p.confidence, err = numberParam(parameters, "confidence", p.confidence, minARIMAConfidence, maxARIMAConfidence); err != nil {
-		return p, err
+		return err
 	}
 	if p.limitsConfidence, err = numberParam(parameters, "limitsConfidence", p.limitsConfidence, minARIMAConfidence, maxARIMAConfidence); err != nil {
-		return p, err
+		return err
 	}
 	if p.limitsConfidence < p.confidence {
-		return p, fmt.Errorf("limitsConfidence (%g) must be >= confidence (%g)", p.limitsConfidence, p.confidence)
+		return fmt.Errorf("limitsConfidence (%g) must be >= confidence (%g)", p.limitsConfidence, p.confidence)
 	}
 	if p.horizon, err = durationParam(parameters, "horizon", p.horizon, maxARIMAHorizon); err != nil {
-		return p, err
+		return err
 	}
 	maxSamples, err := numberParam(parameters, "maxSamples", float64(p.maxSamples), minARIMAMaxSamples, maxARIMAMaxSamples)
 	if err != nil {
-		return p, err
+		return err
 	}
 	if maxSamples != math.Trunc(maxSamples) {
-		return p, fmt.Errorf("maxSamples must be a whole number, got %g", maxSamples)
+		return fmt.Errorf("maxSamples must be a whole number, got %g", maxSamples)
 	}
 	p.maxSamples = int(maxSamples)
-	for _, key := range []string{"requestsBufferPercent", "limitsBufferPercent", "maxChangePercent"} {
+	for _, key := range arimaPostProcessingKeys {
 		if _, err := numberParam(parameters, key, 0, 0, 1000); err != nil {
-			return p, err
+			return err
 		}
 	}
+	return nil
+}
 
-	if p.mode == arimaModeAuto {
-		for _, key := range []string{"order", "seasonalOrder", "seasonalPeriod"} {
-			if _, ok := parameters[key]; ok {
-				return p, fmt.Errorf("%s requires mode '%s'", key, arimaModeFixed)
-			}
+// parseARIMAAutoParameters parses the parameters of mode 'auto'.
+func parseARIMAAutoParameters(parameters map[string]interface{}, p *arimaParams) error {
+	for _, key := range []string{"order", "seasonalOrder", "seasonalPeriod"} {
+		if _, ok := parameters[key]; ok {
+			return fmt.Errorf("%s requires mode '%s'", key, arimaModeFixed)
 		}
-		if v, ok := parameters["seasonal"]; ok {
-			seasonal, isBool := v.(bool)
-			if !isBool {
-				return p, fmt.Errorf("seasonal must be a boolean, got %v", v)
-			}
-			p.seasonal = seasonal
-		}
-		return p, nil
 	}
+	if v, ok := parameters["seasonal"]; ok {
+		seasonal, isBool := v.(bool)
+		if !isBool {
+			return fmt.Errorf("seasonal must be a boolean, got %v", v)
+		}
+		p.seasonal = seasonal
+	}
+	return nil
+}
 
+// parseARIMAFixedParameters parses the parameters of mode 'fixed'.
+func parseARIMAFixedParameters(parameters map[string]interface{}, p *arimaParams) error {
 	if _, ok := parameters["seasonal"]; ok {
-		return p, fmt.Errorf("seasonal requires mode '%s'; use seasonalOrder in mode '%s'", arimaModeAuto, arimaModeFixed)
+		return fmt.Errorf("seasonal requires mode '%s'; use seasonalOrder in mode '%s'", arimaModeAuto, arimaModeFixed)
 	}
 	if _, ok := parameters["order"]; !ok {
-		return p, fmt.Errorf("mode '%s' requires order [p, d, q]", arimaModeFixed)
+		return fmt.Errorf("mode '%s' requires order [p, d, q]", arimaModeFixed)
 	}
+	var err error
 	if p.order, err = orderParam(parameters["order"], "order", [3]int{arimaFixedMaxP, arimaFixedMaxD, arimaFixedMaxQ}); err != nil {
-		return p, err
+		return err
 	}
 	if v, ok := parameters["seasonalOrder"]; ok {
 		if p.seasonalOrder, err = orderParam(v, "seasonalOrder", [3]int{arimaFixedMaxSP, arimaFixedMaxSD, arimaFixedMaxSQ}); err != nil {
-			return p, err
+			return err
 		}
 	}
 	seasonal := p.seasonalOrder != [3]int{}
 	_, hasPeriod := parameters["seasonalPeriod"]
 	switch {
 	case seasonal && !hasPeriod:
-		return p, errors.New("seasonalOrder requires seasonalPeriod")
+		return errors.New("seasonalOrder requires seasonalPeriod")
 	case !seasonal && hasPeriod:
-		return p, errors.New("seasonalPeriod requires a non-zero seasonalOrder")
+		return errors.New("seasonalPeriod requires a non-zero seasonalOrder")
 	case seasonal:
 		if p.seasonalPeriod, err = durationParam(parameters, "seasonalPeriod", 0, arimaWeek); err != nil {
-			return p, err
+			return err
 		}
 	}
-	return p, nil
+	return nil
 }
 
 // numberParam returns the numeric parameter key within [lo, hi], or def if
@@ -711,15 +740,15 @@ func (s *ARIMAStrategy) ValidateFitProfileParameters(parameters map[string]inter
 // GetDefaultFitProfileSpec returns the default FitProfile spec for the ARIMA strategy.
 func (s *ARIMAStrategy) GetDefaultFitProfileSpec() FitProfileSpec {
 	exampleParams := map[string]interface{}{
-		"mode":                  arimaModeAuto,
-		"seasonal":              true,
-		"confidence":            defaultARIMAConfidence,
-		"limitsConfidence":      defaultARIMALimitsConfidence,
-		"horizon":               "24h",
-		"maxSamples":            defaultARIMAMaxSamples,
-		"requestsBufferPercent": 20.0,
-		"limitsBufferPercent":   30.0,
-		"maxChangePercent":      50.0,
+		"mode":                     arimaModeAuto,
+		"seasonal":                 true,
+		"confidence":               defaultARIMAConfidence,
+		"limitsConfidence":         defaultARIMALimitsConfidence,
+		"horizon":                  "24h",
+		"maxSamples":               defaultARIMAMaxSamples,
+		paramRequestsBufferPercent: 20.0,
+		paramLimitsBufferPercent:   30.0,
+		paramMaxChangePercent:      50.0,
 	}
 
 	var paramsSchema map[string]interface{}
