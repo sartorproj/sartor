@@ -13,6 +13,7 @@ require (
 	github.com/onsi/gomega v1.44.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/common v0.74.0
+	github.com/sartorproj/goarima v0.3.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/oauth2 v0.38.0
 	gopkg.in/yaml.v3 v3.0.1

@@ -42,6 +42,7 @@ func NewCalculator() *Calculator {
 	// Register default strategies
 	calc.registry.Register(strategy.NewPercentileStrategy())
 	calc.registry.Register(strategy.NewDSPStrategy(60 * time.Second))
+	calc.registry.Register(strategy.NewARIMAStrategy(strategy.DefaultARIMASampleInterval))
 
 	return calc
 }
