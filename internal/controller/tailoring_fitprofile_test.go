@@ -37,9 +37,10 @@ import (
 	"github.com/sartorproj/sartor/internal/recommender/strategy"
 )
 
-func fitProfile(name, strategyName, params string) *autoscalingv1alpha1.FitProfile {
+// fitProfile returns the FitProfile my-profile in namespace.
+func fitProfile(namespace, strategyName, params string) *autoscalingv1alpha1.FitProfile {
 	fp := &autoscalingv1alpha1.FitProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "example-namespace"},
+		ObjectMeta: metav1.ObjectMeta{Name: "my-profile", Namespace: namespace},
 		Spec:       autoscalingv1alpha1.FitProfileSpec{Strategy: strategyName},
 	}
 	if params != "" {
@@ -68,14 +69,14 @@ func TestResolveFitProfile(t *testing.T) {
 		},
 		{
 			name:         "parameters are not a JSON object",
-			profile:      fitProfile("my-profile", "dsp", `[1, 2]`),
+			profile:      fitProfile("example-namespace", "dsp", `[1, 2]`),
 			wantStrategy: "dsp",
 			wantParams:   map[string]interface{}{},
 			wantFallback: []string{"FitProfile example-namespace/my-profile has invalid parameters", "using default parameters"},
 		},
 		{
 			name:         "malformed JSON parameters",
-			profile:      fitProfile("my-profile", "dsp", `{}`),
+			profile:      fitProfile("example-namespace", "dsp", `{}`),
 			rawOverride:  `{"enablePeakDetection": tru`,
 			wantStrategy: "dsp",
 			wantParams:   map[string]interface{}{},
@@ -83,27 +84,27 @@ func TestResolveFitProfile(t *testing.T) {
 		},
 		{
 			name:         "unknown strategy keeps its parameters",
-			profile:      fitProfile("my-profile", "does-not-exist", `{"maxChangePercent": 50}`),
+			profile:      fitProfile("example-namespace", "does-not-exist", `{"maxChangePercent": 50}`),
 			wantStrategy: strategy.StrategyNamePercentile,
 			wantParams:   map[string]interface{}{"maxChangePercent": 50.0},
 			wantFallback: []string{`references unknown strategy "does-not-exist"`, "using the percentile strategy"},
 		},
 		{
 			name:         "unknown strategy and invalid parameters report both",
-			profile:      fitProfile("my-profile", "does-not-exist", `"text"`),
+			profile:      fitProfile("example-namespace", "does-not-exist", `"text"`),
 			wantStrategy: strategy.StrategyNamePercentile,
 			wantParams:   map[string]interface{}{},
 			wantFallback: []string{"has invalid parameters", "; ", "references unknown strategy"},
 		},
 		{
 			name:         "null parameters",
-			profile:      fitProfile("my-profile", "percentile", `null`),
+			profile:      fitProfile("example-namespace", "percentile", `null`),
 			wantStrategy: strategy.StrategyNamePercentile,
 			wantParams:   map[string]interface{}{},
 		},
 		{
 			name:         "valid FitProfile",
-			profile:      fitProfile("my-profile", "dsp", `{"enablePeakDetection": true}`),
+			profile:      fitProfile("example-namespace", "dsp", `{"enablePeakDetection": true}`),
 			wantStrategy: "dsp",
 			wantParams:   map[string]interface{}{"enablePeakDetection": true},
 			wantPeak:     true,
@@ -172,8 +173,8 @@ func TestReconcile_FitProfileFallbackCondition(t *testing.T) {
 		wantMessage string
 	}{
 		{name: "missing FitProfile", wantMessage: "FitProfile example/my-profile not found"},
-		{name: "invalid parameters", profile: fitProfileIn("example", "percentile", `[1]`), wantMessage: "has invalid parameters"},
-		{name: "unknown strategy", profile: fitProfileIn("example", "does-not-exist", `{}`), wantMessage: `unknown strategy "does-not-exist"`},
+		{name: "invalid parameters", profile: fitProfile("example", "percentile", `[1]`), wantMessage: "has invalid parameters"},
+		{name: "unknown strategy", profile: fitProfile("example", "does-not-exist", `{}`), wantMessage: `unknown strategy "does-not-exist"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -219,7 +220,7 @@ func TestReconcile_FitProfileFallbackCondition(t *testing.T) {
 			assert.Equal(t, ReasonFitProfileFallback, analyzed.Reason)
 			assert.Contains(t, analyzed.Message, tt.wantMessage)
 
-			valid := fitProfileIn("example", "percentile", `{}`)
+			valid := fitProfile("example", "percentile", `{}`)
 			if tt.profile != nil {
 				existing := &autoscalingv1alpha1.FitProfile{}
 				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(valid), existing))
@@ -240,10 +241,4 @@ func TestReconcile_FitProfileFallbackCondition(t *testing.T) {
 			assert.Equal(t, "AnalysisComplete", analyzed.Reason)
 		})
 	}
-}
-
-func fitProfileIn(namespace, strategyName, params string) *autoscalingv1alpha1.FitProfile {
-	fp := fitProfile("my-profile", strategyName, params)
-	fp.Namespace = namespace
-	return fp
 }
