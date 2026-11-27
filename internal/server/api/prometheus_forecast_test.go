@@ -377,33 +377,33 @@ func TestGetPrometheusForecast_Fallback(t *testing.T) {
 		history int
 	}{
 		{
-			name:  "no history",
-			usage: func(int) (float64, bool) { return 0, false },
+			name:   "no history",
+			usage:  func(int) (float64, bool) { return 0, false },
 			reason: "no usage history", history: 0,
 		},
 		{
-			name:  "constant",
-			usage: func(int) (float64, bool) { return 0.25, true },
+			name:   "constant",
+			usage:  func(int) (float64, bool) { return 0.25, true },
 			reason: "usage history is constant", history: 2017,
 		},
 		{
-			name:  "all zero",
-			usage: func(int) (float64, bool) { return 0, true },
+			name:   "all zero",
+			usage:  func(int) (float64, bool) { return 0, true },
 			reason: "usage history is constant", history: 2017,
 		},
 		{
-			name:  "only NaN",
-			usage: func(int) (float64, bool) { return math.NaN(), true },
+			name:   "only NaN",
+			usage:  func(int) (float64, bool) { return math.NaN(), true },
 			reason: "0 valid samples", history: 0,
 		},
 		{
-			name:  "only negative",
-			usage: func(int) (float64, bool) { return -1, true },
+			name:   "only negative",
+			usage:  func(int) (float64, bool) { return -1, true },
 			reason: "0 valid samples", history: 0,
 		},
 		{
-			name:  "infinite",
-			usage: func(int) (float64, bool) { return math.Inf(1), true },
+			name:   "infinite",
+			usage:  func(int) (float64, bool) { return math.Inf(1), true },
 			reason: "0 valid samples", history: 0,
 		},
 		{
