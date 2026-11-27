@@ -56,6 +56,10 @@ CPU and memory are forecast independently. A resource uses the **percentile stra
 
 The reason is recorded in the recommendation metadata, for example `cpu_fallback: "percentile: usage history is constant"`. When a forecast is used, the metadata contains `cpu_model` (e.g. `SARIMA(1,0,0)(1,1,0)[96]`), `cpu_sample_interval`, `cpu_samples`, `cpu_upper_bound` and `cpu_limits_upper_bound` (and the same keys for memory), plus `horizon`.
 
+### On-Demand Forecasts
+
+The API server exposes the same forecast for any container at `GET /api/v1/prometheus/forecast`, with the history, the point forecast and the prediction interval, so it can be shown in the UI. See the [API Reference](api-reference.md#container-usage-forecast).
+
 ## Parameters
 
 All parameters are optional. Unknown parameters are rejected.
