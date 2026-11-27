@@ -223,6 +223,11 @@ func (r *TailoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Calculate recommendations using strategy-based calculator
 	calculator := recommender.NewCalculator()
+	if s, ok := calculator.GetRegistry().Get(strategyName); ok {
+		if hs, ok := s.(strategy.HistoryStrategy); ok {
+			addUsageHistory(ctx, promClient, tailoring, metrics, analysisWindow, hs.HistoryStep(analysisWindow), logger)
+		}
+	}
 	recommendations, err := calculator.Calculate(
 		ctx,
 		metrics,
@@ -553,6 +558,29 @@ func (r *TailoringReconciler) resolveFitProfile(
 	}
 
 	return fitProfile.Spec.Strategy, params, enablePeakDetection, enableNormalization, fitProfile.Spec.SafetyRailsOverride
+}
+
+// addUsageHistory fills the usage history of metrics for strategies that
+// forecast from it. Without history those strategies fall back to the
+// percentiles, so a failed query does not fail the analysis.
+func addUsageHistory(
+	ctx context.Context,
+	promClient *prometheus.Client,
+	tailoring *autoscalingv1alpha1.Tailoring,
+	metrics []prometheus.ContainerMetrics,
+	window, step time.Duration,
+	logger logr.Logger,
+) {
+	history, err := promClient.GetContainerHistory(ctx, tailoring.TargetNamespace(), targetWorkload(tailoring), window, step)
+	if err != nil {
+		logger.Error(err, "Failed to get usage history, falling back to percentiles")
+		return
+	}
+	for i := range metrics {
+		h := history[metrics[i].ContainerName]
+		metrics[i].CPUHistory = h.CPU
+		metrics[i].MemoryHistory = h.Memory
+	}
 }
 
 // convertStrategyRecommendations converts strategy.Recommendation to the old format for compatibility.

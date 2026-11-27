@@ -245,6 +245,7 @@ func main() {
 	strategyRegistry := strategy.NewStrategyRegistry()
 	strategyRegistry.Register(strategy.NewPercentileStrategy())
 	strategyRegistry.Register(strategy.NewDSPStrategy(60))
+	strategyRegistry.Register(strategy.NewARIMAStrategy(strategy.DefaultARIMASampleInterval))
 
 	if err := (&controller.FitProfileReconciler{
 		Client:           mgr.GetClient(),

@@ -31,6 +31,8 @@ const (
 	StrategyNamePercentile = "percentile"
 	// StrategyNameDSP is the registry name of the DSP strategy.
 	StrategyNameDSP = "dsp"
+	// StrategyNameARIMA is the registry name of the ARIMA strategy.
+	StrategyNameARIMA = "arima"
 )
 
 // Strategy is the interface that all recommendation strategies must implement.
@@ -68,6 +70,18 @@ type Strategy interface {
 		recommendations []Recommendation,
 		config StrategyConfig,
 	) (map[string]map[int64]float64, error)
+}
+
+// HistoryStrategy is implemented by strategies that forecast from usage
+// history instead of aggregated percentiles. Before Calculate, callers fill
+// ContainerMetrics.CPUHistory and MemoryHistory with samples taken every
+// HistoryStep over the analysis window. History may be missing or partial;
+// such strategies must then fall back to the aggregated values.
+type HistoryStrategy interface {
+	Strategy
+
+	// HistoryStep returns the query resolution for an analysis window.
+	HistoryStep(window time.Duration) time.Duration
 }
 
 // FitProfileSpec defines the structure for a FitProfile configuration.

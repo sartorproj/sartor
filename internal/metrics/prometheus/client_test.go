@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -288,6 +289,87 @@ func TestClient_GetTimeSeriesMetrics_ShortWindow(t *testing.T) {
 	points, err := client.GetTimeSeriesMetrics(ctx, "default", testWorkload, "app", "cpu", time.Second*10)
 	require.NoError(t, err)
 	assert.Empty(t, points)
+}
+
+func TestClient_GetContainerHistory(t *testing.T) {
+	var queries, steps []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/query_range" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		query := r.FormValue("query")
+		queries = append(queries, query)
+		steps = append(steps, r.FormValue("step"))
+		value := "0.5"
+		if strings.Contains(query, "container_memory_working_set_bytes") {
+			value = "1048576"
+		}
+		series := func(container string) map[string]interface{} {
+			return map[string]interface{}{
+				"metric": map[string]string{"container": container},
+				"values": [][]interface{}{{1234567890.0, value}, {1234568190.0, value}},
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "success",
+			"data": map[string]interface{}{
+				"resultType": "matrix",
+				"result":     []map[string]interface{}{series("app"), series("sidecar"), series("")},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{URL: server.URL})
+	require.NoError(t, err)
+
+	history, err := client.GetContainerHistory(context.Background(), "default", testWorkload, 7*24*time.Hour, 5*time.Minute)
+	require.NoError(t, err)
+	require.Len(t, history, 2)
+	assert.Equal(t, []TimeSeriesPoint{{Timestamp: 1234567890, Value: 0.5}, {Timestamp: 1234568190, Value: 0.5}}, history["app"].CPU)
+	assert.Equal(t, []TimeSeriesPoint{{Timestamp: 1234567890, Value: 1048576}, {Timestamp: 1234568190, Value: 1048576}}, history["sidecar"].Memory,
+		"memory history is in bytes")
+	assert.Equal(t, []string{"300", "300"}, steps)
+
+	sel, err := client.newSelector(context.Background(), "default", testWorkload)
+	require.NoError(t, err)
+	cpu, mem := containerUsageExprs(sel)
+	assert.Equal(t, []string{cpu, mem}, queries, "history uses the expressions of the percentile queries")
+	for _, q := range containerMetricQueries(sel, 7*24*time.Hour) {
+		assert.True(t, strings.Contains(q.query, cpu) || strings.Contains(q.query, mem), q.query)
+	}
+
+	raw, err := json.Marshal(ContainerMetrics{ContainerName: "app", CPUHistory: history["app"].CPU, MemoryHistory: history["app"].Memory})
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "History", "history is not part of the metrics API response")
+}
+
+func TestClient_GetContainerHistory_Errors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "success",
+			"data":   map[string]interface{}{"resultType": "vector", "result": []interface{}{}},
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(Config{URL: server.URL})
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	_, err = client.GetContainerHistory(ctx, "default", testWorkload, time.Hour, 0)
+	assert.ErrorContains(t, err, "must be positive")
+	_, err = client.GetContainerHistory(ctx, "default", testWorkload, 90*24*time.Hour, time.Minute)
+	assert.ErrorContains(t, err, "more than 10000 points")
+	_, err = client.GetContainerHistory(ctx, "default", testWorkload, time.Hour, time.Minute)
+	assert.ErrorContains(t, err, "unexpected result type")
+
+	unreachable, err := NewClient(Config{URL: "http://127.0.0.1:1"})
+	require.NoError(t, err)
+	_, err = unreachable.GetContainerHistory(ctx, "default", testWorkload, time.Hour, time.Minute)
+	assert.ErrorContains(t, err, "failed to query CPU history")
 }
 
 func TestFormatDuration(t *testing.T) {

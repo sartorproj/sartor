@@ -15,6 +15,7 @@ Calculator
   └── StrategyRegistry
       ├── PercentileStrategy (default)
       ├── DSPStrategy
+      ├── ARIMAStrategy
       └── [Custom Strategies]
 ```
 
@@ -58,6 +59,19 @@ type Strategy interface {
 - Autocorrelation Function (ACF) for period verification
 - Random permutation threshold calculation
 - Peak verification using linear regression
+
+### 3. ARIMA Strategy
+
+**Location**: `internal/recommender/strategy/arima.go`
+
+**Features:**
+- **Usage History**: Fitted to the CPU and memory usage history, queried by the controller because the strategy implements `HistoryStrategy`
+- **Model Selection**: Automatic (seasonal) ARIMA order selection with [goarima](https://github.com/sartorproj/goarima), with daily and weekly periods derived from the sample interval, or a fixed order
+- **Prediction Interval**: Recommends the upper bound of the `confidence` (requests) and `limitsConfidence` (limits) prediction intervals over the `horizon`
+- **Bounded Cost**: History is downsampled to `maxSamples` and the order search space is capped
+- **Fallback**: Uses the percentile result per resource when the history or the fit is unusable, and records the reason in the metadata
+
+See [ARIMA Strategy Deep Dive](arima-strategy.md).
 
 ## Preprocessing
 
@@ -138,6 +152,18 @@ spec:
     marginFraction: 0.2
 ```
 
+### ARIMA Strategy
+
+```yaml
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: FitProfile
+spec:
+  strategy: "arima"
+  parameters:
+    confidence: 0.95
+    horizon: 24h
+```
+
 ## Implementation Details
 
 ### Calculator Refactoring
@@ -164,6 +190,7 @@ recommendations, err := calculator.Calculate(
 Strategies are automatically registered:
 - `PercentileStrategy` - Always registered
 - `DSPStrategy` - Always registered
+- `ARIMAStrategy` - Always registered
 - Custom strategies can be registered via `calculator.RegisterStrategy()`
 
 ### Backward Compatibility
@@ -186,6 +213,11 @@ Conversion functions handle the mapping between formats.
 - **Memory**: Stores full time series
 - **Best for**: Batch analysis, periodic workloads
 
+### ARIMA Strategy
+- **Time Complexity**: Bounded by `maxSamples` and the capped order search; about 2 to 4 ms per resource for 7 to 28 days of history
+- **Memory**: Stores the usage history for each container
+- **Best for**: Trending and periodic workloads
+
 ## Testing
 
 Unit tests added for:
@@ -195,6 +227,7 @@ Unit tests added for:
 - FFT and ACF calculations
 - Preprocessing functions
 - Peak detection algorithms
+- ARIMA forecasts, fallbacks and parameter validation
 
 ## Future Enhancements
 

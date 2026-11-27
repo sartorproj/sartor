@@ -1,0 +1,22 @@
+apiVersion: autoscaling.sartorproj.io/v1alpha1
+kind: FitProfile
+metadata:
+  name: arima
+  namespace: default
+spec:
+  strategy: arima
+  displayName: "ARIMA Forecasting"
+  description: "Forecasts usage with seasonal ARIMA models and sizes for the upper prediction bound over the next day"
+  parameters:
+    mode: auto
+    seasonal: true
+    confidence: 0.95
+    limitsConfidence: 0.99
+    horizon: 24h
+    maxSamples: 1000
+    requestsBufferPercent: 20
+    limitsBufferPercent: 30
+    maxChangePercent: 50
+  priority: 0
+  labels:
+    strategy: arima

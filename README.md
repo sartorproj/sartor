@@ -24,8 +24,9 @@
 ### Key Features
 
 - 🎯 **Intent-Based Optimization**: Choose from Eco, Balanced, or Critical profiles
-- 📊 **Flexible Recommendation Strategies**: Plugin-based system supporting percentile and DSP-based prediction
+- 📊 **Flexible Recommendation Strategies**: Plugin-based system supporting percentile, DSP-based and ARIMA-based prediction
 - 🔬 **DSP-Based Prediction**: Advanced time series forecasting using FFT and autocorrelation (inspired by [Crane](https://gocrane.io))
+- 📉 **ARIMA Forecasting**: Seasonal ARIMA models size workloads for the upper prediction bound of their usage forecast
 - 📈 **Peak Detection**: Advanced algorithms for detecting anomalous peaks in resource usage
 - 🧹 **Data Preprocessing**: Automatic imputation, outlier removal, and normalization
 - 🔄 **GitOps Integration**: Creates PRs for raw YAML, Helm, and Kustomize
@@ -108,7 +109,7 @@ spec:
 
 - [Getting Started Guide](docs/getting-started.md)
 - [Configuration Reference](docs/configuration.md)
-- [Recommendation Strategies](docs/recommendation-strategies.md) - Percentile vs DSP strategies
+- [Recommendation Strategies](docs/recommendation-strategies.md) - Percentile, DSP and ARIMA strategies
 - [Intent Profiles Explained](docs/intent-profiles.md)
 - [GitOps Integration](docs/gitops-integration.md)
 - [ArgoCD Setup](docs/argocd-setup.md)

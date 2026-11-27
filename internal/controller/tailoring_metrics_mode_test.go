@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -183,6 +184,9 @@ type metricsBackend struct {
 	memUsage  float64
 	noUsage   bool
 	fail      bool
+	// history, when set, answers range queries with one "app" series whose
+	// value at a timestamp it returns; otherwise range queries get a vector.
+	history func(ts float64, memory bool) float64
 }
 
 func (b *metricsBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -191,9 +195,28 @@ func (b *metricsBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b.queries = append(b.queries, q)
 	fail, snapshots := b.fail, b.snapshots
 	cpuUsage, memUsage, noUsage := b.cpuUsage, b.memUsage, b.noUsage
+	history := b.history
 	b.mu.Unlock()
 	if fail {
 		http.Error(w, "backend unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if history != nil && strings.HasSuffix(r.URL.Path, "/query_range") {
+		start, _ := strconv.ParseFloat(r.FormValue("start"), 64)
+		end, _ := strconv.ParseFloat(r.FormValue("end"), 64)
+		step, _ := strconv.ParseFloat(r.FormValue("step"), 64)
+		memory := strings.Contains(q, "container_memory_working_set_bytes")
+		var values [][]interface{}
+		for ts := start; ts <= end; ts += step {
+			values = append(values, []interface{}{ts, strconv.FormatFloat(history(ts, memory), 'f', -1, 64)})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "success",
+			"data": map[string]interface{}{"resultType": "matrix", "result": []map[string]interface{}{
+				{"metric": map[string]string{"container": "app"}, "values": values},
+			}},
+		})
 		return
 	}
 
@@ -589,4 +612,58 @@ func TestMetricsMode_ClusterLabel(t *testing.T) {
 	_, tl = fx.reconcile(t, "unscoped")
 	assert.Equal(t, before, fx.backend.count(), "no query without a cluster")
 	assert.Contains(t, condition(tl, ConditionTypeAnalyzed).Message, "a target cluster is required")
+}
+
+// useARIMA switches the fixture's FitProfile to the arima strategy without
+// a change limit, so the forecast is visible in the recommendation.
+func (fx *mmFixture) useARIMA(t *testing.T) {
+	t.Helper()
+	fp := &autoscalingv1alpha1.FitProfile{}
+	require.NoError(t, fx.client.Get(fx.ctx, types.NamespacedName{Namespace: mmTailoringNS, Name: "balanced"}, fp))
+	fp.Spec.Strategy = "arima"
+	fp.Spec.Parameters = &runtime.RawExtension{Raw: []byte(`{"maxChangePercent": 1000}`)}
+	require.NoError(t, fx.client.Update(fx.ctx, fp))
+}
+
+// TestMetricsMode_ARIMAForecastsFromHistory: the arima strategy gets the
+// usage history from two extra range queries and sizes from the forecast
+// instead of the P95 (1 core) the percentile strategy would use.
+func TestMetricsMode_ARIMAForecastsFromHistory(t *testing.T) {
+	fx := newMetricsModeFixture(t, mmTailoring("web"))
+	fx.reconciler.EnableGitWriteBack = false
+	fx.useARIMA(t)
+	fx.backend.set(func(b *metricsBackend) {
+		b.history = func(ts float64, memory bool) float64 {
+			wave := math.Sin(2 * math.Pi * ts / 86400)
+			if memory {
+				return 600*mi + 100*mi*wave
+			}
+			return 0.5 + 0.3*wave
+		}
+	})
+
+	_, tl := fx.reconcile(t, "web")
+
+	require.NotNil(t, tl.Status.LastAnalysis, tl.Status.Conditions)
+	assert.Equal(t, 7, fx.backend.count(), "1 snapshot + 4 usage queries + 2 history queries")
+	rec := tl.Status.LastAnalysis.Containers[0].Recommended
+	cpu := rec.Requests.CPU.AsApproximateFloat64()
+	assert.True(t, cpu >= 0.99*0.8*1.2 && cpu <= 1.07*0.8*1.2, "requests.cpu %s sized from the daily peak of 0.8 cores", rec.Requests.CPU)
+	mem := rec.Requests.Memory.AsApproximateFloat64()
+	assert.True(t, mem >= 0.99*700*mi*1.2 && mem <= 1.07*700*mi*1.2, "requests.memory %s sized from the daily peak of 700Mi", rec.Requests.Memory)
+}
+
+// TestMetricsMode_ARIMAWithoutHistory: when the history query fails the
+// analysis still succeeds with the percentile values.
+func TestMetricsMode_ARIMAWithoutHistory(t *testing.T) {
+	fx := newMetricsModeFixture(t, mmTailoring("web"))
+	fx.reconciler.EnableGitWriteBack = false
+	fx.useARIMA(t)
+
+	_, tl := fx.reconcile(t, "web")
+
+	require.NotNil(t, tl.Status.LastAnalysis, tl.Status.Conditions)
+	assert.Equal(t, 6, fx.backend.count(), "the failed CPU history query ends the history fetch")
+	rec := tl.Status.LastAnalysis.Containers[0].Recommended
+	assert.Equal(t, "1200m", rec.Requests.CPU.String(), "P95 of 1 core plus the 20% buffer")
 }
