@@ -1,11 +1,12 @@
 name: Images
 
 # Builds the distroless controller and server images for linux/amd64 and linux/arm64.
-# Pull requests build (and smoke-test amd64) without pushing; v* tags push to GHCR.
+# Pull requests build (and smoke-test amd64) without pushing; pushes to main and v* tags push to GHCR.
 on:
   pull_request:
     branches: [main]
   push:
+    branches: [main]
     tags:
     - v*
   workflow_dispatch:
@@ -36,7 +37,7 @@ jobs:
           description: Sartor API server
     env:
       IMAGE: ghcr.io/sartorproj/${{ matrix.name }}
-      PUSH: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      PUSH: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,13 +62,16 @@ jobs:
       with:
         images: ${{ env.IMAGE }}
         # v1.2.3 -> 1.2.3, 1.2, 1, v1.2.3, sha-<short>, latest (latest/major.minor skipped for pre-releases).
+        # main -> main, <short>, sha-<short> (never latest: flavor latest=auto only sets it for tag refs).
         tags: |
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
           type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
           type=ref,event=tag
+          type=ref,event=branch
           type=ref,event=pr
           type=sha
+          type=sha,prefix=,enable=${{ github.ref == 'refs/heads/main' }}
         labels: |
           org.opencontainers.image.title=${{ matrix.name }}
           org.opencontainers.image.description=${{ matrix.description }}
