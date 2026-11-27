@@ -108,16 +108,68 @@ spec:
     path: "apps/web-app/deployment.yaml"
 ```
 
+### 3. ARIMA Strategy
+
+The **arima** strategy forecasts usage with (seasonal) ARIMA models and recommends the upper bound of the prediction interval over a forecast horizon. It is fitted to the actual usage history, which the controller queries in addition to the percentiles. See [ARIMA Strategy Deep Dive](arima-strategy.md) for details.
+
+**Configuration** (in a FitProfile, see `config/samples/fitprofile-arima.yaml`):
+```yaml
+spec:
+  strategy: arima
+  parameters:
+    mode: auto          # or "fixed" with order / seasonalOrder / seasonalPeriod
+    seasonal: true
+    confidence: 0.95
+    limitsConfidence: 0.99
+    horizon: 24h
+    maxSamples: 1000
+    requestsBufferPercent: 20
+    limitsBufferPercent: 30
+    maxChangePercent: 50
+```
+
+**How it works:**
+1. **History**: Queries CPU and memory usage over the analysis window at a 5m resolution
+2. **Preparation**: Drops invalid samples, downsamples to at most `maxSamples` (keeping the maximum of each bucket) and interpolates gaps
+3. **Model Selection**: Selects the ARIMA order automatically, including seasonal models with daily and weekly periods, or fits a fixed order
+4. **Prediction**: Uses the upper bound of the `confidence` interval over the `horizon` for requests and of the `limitsConfidence` interval for limits
+5. **Post-processing**: Applies buffers, `maxChangePercent`, safety rails and quotas exactly like the percentile strategy
+
+If the history is missing, too short, constant or too sparse, or the model fit fails or returns an invalid forecast, the resource falls back to the percentile result. The reason is recorded in the recommendation metadata (e.g. `cpu_fallback`).
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `mode` | string | "auto" | "auto" (automatic order selection) or "fixed" |
+| `seasonal` | bool | true | Consider daily and weekly seasonal models (auto mode) |
+| `order` | [p, d, q] | | Non-seasonal order (fixed mode, required) |
+| `seasonalOrder` | [P, D, Q] | [0, 0, 0] | Seasonal order (fixed mode) |
+| `seasonalPeriod` | duration | | Seasonal period, e.g. "24h" (fixed mode) |
+| `confidence` | float64 | 0.95 | Prediction interval level for requests |
+| `limitsConfidence` | float64 | 0.99 | Prediction interval level for limits |
+| `horizon` | duration | "24h" | Forecast horizon (at most 168h) |
+| `maxSamples` | int | 1000 | Maximum samples a model is fitted to (100 to 5000) |
+| `requestsBufferPercent` | float64 | 20 | Buffer added to requests |
+| `limitsBufferPercent` | float64 | 30 | Buffer added to limits |
+| `maxChangePercent` | float64 | 50 | Maximum change per recommendation |
+
+**Best for:**
+- Workloads with growing or shrinking usage
+- Workloads with daily or weekly cycles (weekly needs an analysis window of at least 21 days)
+- Sizing for a forecast horizon with a stated confidence
+
 ## Strategy Comparison
 
-| Feature | Percentile | DSP |
-|---------|-----------|-----|
-| **Speed** | Fast | Slower (requires FFT) |
-| **Period Detection** | No | Yes (daily/weekly) |
-| **Prediction** | Current usage | Future usage |
-| **Peak Detection** | No | Yes (optional) |
-| **Normalization** | No | Yes (optional) |
-| **Best for** | Stable workloads | Periodic workloads |
+| Feature | Percentile | DSP | ARIMA |
+|---------|-----------|-----|-------|
+| **Speed** | Fast | Slower (requires FFT) | Slower (model fit, a few ms per resource) |
+| **Period Detection** | No | Yes (daily/weekly) | Yes (daily/weekly) |
+| **Trend** | No | No | Yes |
+| **Prediction** | Current usage | Future usage | Future usage with a prediction interval |
+| **Peak Detection** | No | Yes (optional) | No |
+| **Normalization** | No | Yes (optional) | No |
+| **Best for** | Stable workloads | Periodic workloads | Trending and periodic workloads |
 
 ## Creating Custom Strategies
 
@@ -166,3 +218,4 @@ Peaks are stored in recommendation metadata for analysis.
 - [Crane DSP Algorithm](https://gocrane.io/docs/core-concept/timeseries-forecasting-by-dsp/)
 - [FFT Documentation](https://en.wikipedia.org/wiki/Fast_Fourier_transform)
 - [Autocorrelation Function](https://en.wikipedia.org/wiki/Autocorrelation)
+- [ARIMA Models](https://otexts.com/fpp3/arima.html)

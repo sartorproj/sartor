@@ -252,6 +252,7 @@ In `cmd/controller/main.go`, register your strategy:
 strategyRegistry := strategy.NewStrategyRegistry()
 strategyRegistry.Register(strategy.NewPercentileStrategy())
 strategyRegistry.Register(strategy.NewDSPStrategy(60))
+strategyRegistry.Register(strategy.NewARIMAStrategy(strategy.DefaultARIMASampleInterval))
 strategyRegistry.Register(strategy.NewMyStrategy()) // Add your strategy
 
 if err := (&controller.FitProfileReconciler{
@@ -292,7 +293,10 @@ The `prometheus.ContainerMetrics` struct provides:
 - `P99CPU`: 99th percentile CPU usage
 - `P95Memory`: 95th percentile memory usage
 - `P99Memory`: 99th percentile memory usage
-- `TimeSeries`: Full time series data (if available)
+- `CPUHistory`: CPU usage over the analysis window in cores (history-based strategies only)
+- `MemoryHistory`: Memory usage over the analysis window in bytes (history-based strategies only)
+
+The history is only queried for strategies that implement the optional `strategy.HistoryStrategy` interface. `HistoryStep(window)` returns the query resolution for an analysis window, and must keep `window / step` at or below `prometheus.MaxHistoryPoints`. The history may be missing (for example when the query fails) or contain gaps, so such strategies must fall back to the percentile values. See `internal/recommender/strategy/arima.go` for an example.
 
 ## StrategyConfig Fields
 
