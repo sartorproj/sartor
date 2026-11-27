@@ -102,8 +102,17 @@ const (
 
 var arimaPostProcessingKeys = []string{paramRequestsBufferPercent, paramLimitsBufferPercent, paramMaxChangePercent}
 
+// Parameters that select the model.
+const (
+	paramMode           = "mode"
+	paramSeasonal       = "seasonal"
+	paramOrder          = "order"
+	paramSeasonalOrder  = "seasonalOrder"
+	paramSeasonalPeriod = "seasonalPeriod"
+)
+
 var arimaParameterKeys = map[string]bool{
-	"mode": true, "order": true, "seasonalOrder": true, "seasonalPeriod": true, "seasonal": true,
+	paramMode: true, paramOrder: true, paramSeasonalOrder: true, paramSeasonalPeriod: true, paramSeasonal: true,
 	"confidence": true, "limitsConfidence": true, "horizon": true, "maxSamples": true,
 	paramRequestsBufferPercent: true, paramLimitsBufferPercent: true, paramMaxChangePercent: true,
 }
@@ -251,6 +260,55 @@ func (s *ARIMAStrategy) calculateForContainer(
 // prediction intervals over the horizon. Any error means the resource falls
 // back to the percentile calculation.
 func (s *ARIMAStrategy) forecast(ctx context.Context, history []prometheus.TimeSeriesPoint, params arimaParams) (f arimaForecast, err error) {
+	m, err := s.fit(ctx, history, params)
+	if err != nil {
+		return f, err
+	}
+	defer recoverFit(&err)
+	point, _, upper, err := m.predict(m.steps, params.confidence)
+	if err != nil {
+		return f, err
+	}
+	_, _, limitsUpper, err := m.predict(m.steps, params.limitsConfidence)
+	if err != nil {
+		return f, err
+	}
+
+	f = arimaForecast{
+		model:    m.model,
+		interval: m.interval,
+		samples:  m.samples,
+		start:    m.start,
+		point:    point,
+		upper:    upper,
+	}
+	if f.requests, err = upperBound(upper, m.peak); err != nil {
+		return f, err
+	}
+	if f.limits, err = upperBound(limitsUpper, m.peak); err != nil {
+		return f, err
+	}
+	f.limits = math.Max(f.limits, f.requests)
+	return f, nil
+}
+
+// arimaFit is a model fitted to a prepared usage history.
+type arimaFit struct {
+	predict  predictFunc
+	model    string
+	interval time.Duration
+	samples  int
+	// start is the timestamp of the first forecast step.
+	start int64
+	// steps is the number of forecast steps that cover the horizon.
+	steps int
+	// peak is the largest value of the prepared history.
+	peak float64
+}
+
+// fit prepares history and fits the configured model to it. Any error means
+// the history cannot be forecast.
+func (s *ARIMAStrategy) fit(ctx context.Context, history []prometheus.TimeSeriesPoint, params arimaParams) (f arimaFit, err error) {
 	if err := ctx.Err(); err != nil {
 		return f, fmt.Errorf("analysis cancelled: %w", err)
 	}
@@ -271,47 +329,34 @@ func (s *ARIMAStrategy) forecast(ctx context.Context, history []prometheus.TimeS
 
 	// The library is not hardened against every degenerate input; a panic
 	// in a fit must not take down the analysis of other workloads.
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("model fit failed: %v", r)
-		}
-	}()
+	defer recoverFit(&err)
 
-	steps := int(math.Ceil(float64(params.horizon) / float64(interval)))
 	predict, model, err := fitARIMA(timeseries.New(values), interval, params)
 	if err != nil {
 		return f, err
 	}
-	point, upper, err := predict(steps, params.confidence)
-	if err != nil {
-		return f, err
-	}
-	_, limitsUpper, err := predict(steps, params.limitsConfidence)
-	if err != nil {
-		return f, err
-	}
-
-	f = arimaForecast{
+	return arimaFit{
+		predict:  predict,
 		model:    model,
 		interval: interval,
 		samples:  len(values),
 		start:    start + int64(len(values))*int64(interval/time.Second),
-		point:    point,
-		upper:    upper,
-	}
-	if f.requests, err = upperBound(upper, hi); err != nil {
-		return f, err
-	}
-	if f.limits, err = upperBound(limitsUpper, hi); err != nil {
-		return f, err
-	}
-	f.limits = math.Max(f.limits, f.requests)
-	return f, nil
+		steps:    int(math.Ceil(float64(params.horizon) / float64(interval))),
+		peak:     hi,
+	}, nil
 }
 
-// predictFunc returns the point forecast and the upper prediction bound at a
-// confidence level for the given number of steps.
-type predictFunc func(steps int, confidence float64) (point, upper []float64, err error)
+// recoverFit turns a panic in the library into an error. It must be deferred
+// directly, so that recover takes effect.
+func recoverFit(err *error) {
+	if r := recover(); r != nil {
+		*err = fmt.Errorf("model fit failed: %v", r)
+	}
+}
+
+// predictFunc returns the point forecast and the lower and upper prediction
+// bounds at a confidence level for the given number of steps.
+type predictFunc func(steps int, confidence float64) (point, lower, upper []float64, err error)
 
 // fitARIMA fits the configured model and returns its predictor and order.
 func fitARIMA(series *timeseries.Series, interval time.Duration, params arimaParams) (predictFunc, string, error) {
@@ -338,11 +383,7 @@ func fitARIMA(series *timeseries.Series, interval time.Duration, params arimaPar
 	if result == nil {
 		return nil, "", errors.New("model selection found no model that fits")
 	}
-	predict := func(steps int, confidence float64) ([]float64, []float64, error) {
-		point, _, upper, err := result.PredictWithInterval(steps, confidence)
-		return point, upper, err
-	}
-	return predict, result.Order(), nil
+	return result.PredictWithInterval, result.Order(), nil
 }
 
 // fitFixedARIMA fits the ARIMA or SARIMA model of the configured orders.
@@ -354,11 +395,7 @@ func fitFixedARIMA(series *timeseries.Series, interval time.Duration, params ari
 		if err := model.Fit(series); err != nil {
 			return nil, "", fmt.Errorf("model fit failed: %w", err)
 		}
-		predict := func(steps int, confidence float64) ([]float64, []float64, error) {
-			point, _, upper, err := model.PredictWithInterval(steps, confidence)
-			return point, upper, err
-		}
-		return predict, fmt.Sprintf("ARIMA(%d,%d,%d)", p, d, q), nil
+		return model.PredictWithInterval, fmt.Sprintf("ARIMA(%d,%d,%d)", p, d, q), nil
 	}
 
 	m := int(math.Round(float64(params.seasonalPeriod) / float64(interval)))
@@ -369,11 +406,7 @@ func fitFixedARIMA(series *timeseries.Series, interval time.Duration, params ari
 	if err := model.Fit(series); err != nil {
 		return nil, "", fmt.Errorf("model fit failed: %w", err)
 	}
-	predict := func(steps int, confidence float64) ([]float64, []float64, error) {
-		point, _, upper, err := model.PredictWithInterval(steps, confidence)
-		return point, upper, err
-	}
-	return predict, fmt.Sprintf("SARIMA(%d,%d,%d)(%d,%d,%d)[%d]", p, d, q, sp, sd, sq, m), nil
+	return model.PredictWithInterval, fmt.Sprintf("SARIMA(%d,%d,%d)(%d,%d,%d)[%d]", p, d, q, sp, sd, sq, m), nil
 }
 
 // seasonalPeriods returns the daily and weekly periods in samples that a
