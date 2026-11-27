@@ -324,6 +324,7 @@ func applyOOMFloor(recs []strategy.Recommendation, current map[string]autoscalin
 		if cur.Limits != nil {
 			recs[i].Limits.Memory = maxQuantity(recs[i].Limits.Memory, cur.Limits.Memory)
 		}
+		strategy.EnsureLimitsCoverRequests(&recs[i])
 	}
 }
 
